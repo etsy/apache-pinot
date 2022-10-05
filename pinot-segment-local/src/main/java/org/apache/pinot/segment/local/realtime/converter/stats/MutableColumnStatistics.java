@@ -103,13 +103,6 @@ public class MutableColumnStatistics implements ColumnStatistics {
     _maxElementLength = 0;
     int length = _dictionary.length();
     switch (storedType) {
-      case BIG_DECIMAL:
-        for (int i = 0; i < length; i++) {
-          int elementLength = BigDecimalUtils.byteSize(_dictionary.getBigDecimalValue(i));
-          _minElementLength = Math.min(_minElementLength, elementLength);
-          _maxElementLength = Math.max(_maxElementLength, elementLength);
-        }
-        break;
       case STRING:
         for (int i = 0; i < length; i++) {
           int elementLength = _dictionary.getStringValue(i).getBytes(StandardCharsets.UTF_8).length;
