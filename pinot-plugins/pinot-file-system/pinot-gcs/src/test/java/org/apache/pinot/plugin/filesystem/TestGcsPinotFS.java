@@ -36,7 +36,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.testng.SkipException;
-import org.testng.annotations.AfterClass;
+import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -89,7 +89,7 @@ public class TestGcsPinotFS {
     }
   }
 
-  @AfterClass
+  @AfterMethod
   public void tearDown()
       throws Exception {
     if (_pinotFS != null) {
