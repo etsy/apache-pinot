@@ -31,26 +31,6 @@ public class CombineOperatorUtils {
   }
 
   /**
-   * Use at most 10 or half of the processors threads for each query. If there are less than 2 processors, use 1 thread.
-   * <p>NOTE: Runtime.getRuntime().availableProcessors() may return value < 2 in container based environment, e.g.
-   *          Kubernetes.
-   */
-  public static final int MAX_NUM_THREADS_PER_QUERY =
-      Math.max(1, Math.min(10, Runtime.getRuntime().availableProcessors() / 2));
-
-  /**
-   * Returns the number of tasks for the query execution. The tasks can be assigned to multiple execution threads so
-   * that they can run in parallel. The parallelism is bounded by the task count.
-   */
-  public static int getNumTasksForQuery(int numOperators, int maxExecutionThreads) {
-    if (maxExecutionThreads > 0) {
-      return Math.min(numOperators, maxExecutionThreads);
-    } else {
-      return Math.min(numOperators, MAX_NUM_THREADS_PER_QUERY);
-    }
-  }
-
-  /**
    * Sets the execution statistics into the results block.
    */
   public static void setExecutionStatistics(BaseResultsBlock resultsBlock, List<Operator> operators,
@@ -68,15 +48,13 @@ public class CombineOperatorUtils {
       if (executionStatistics.getNumDocsScanned() > 0) {
         numSegmentsMatched++;
       }
-      // TODO: Check all operators and properly implement the getIndexSegment and remove this exception handling
-      try {
-        if (operator.getIndexSegment() instanceof MutableSegment) {
-          numConsumingSegmentsProcessed += 1;
-          if (executionStatistics.getNumDocsScanned() > 0) {
-            numConsumingSegmentsMatched++;
-          }
+
+      // TODO: Check all operators and properly implement the getIndexSegment.
+      if (operator.getIndexSegment() instanceof MutableSegment) {
+        numConsumingSegmentsProcessed += 1;
+        if (executionStatistics.getNumDocsScanned() > 0) {
+          numConsumingSegmentsMatched++;
         }
-      } catch (UnsupportedOperationException ignored) {
       }
 
       numDocsScanned += executionStatistics.getNumDocsScanned();

@@ -21,6 +21,7 @@ package org.apache.pinot.core.operator.blocks.results;
 import java.io.IOException;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.testng.annotations.Test;
@@ -35,20 +36,20 @@ public class ResultsBlockUtilsTest {
       throws IOException {
     // Selection
     QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT * FROM testTable WHERE foo = 'bar'");
-    DataTable dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable(queryContext);
+    DataTable dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable();
     DataSchema dataSchema = dataTable.getDataSchema();
     assertEquals(dataSchema.getColumnNames(), new String[]{"*"});
-    assertEquals(dataSchema.getColumnDataTypes(), new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.STRING});
+    assertEquals(dataSchema.getColumnDataTypes(), new ColumnDataType[]{ColumnDataType.STRING});
     assertEquals(dataTable.getNumberOfRows(), 0);
 
     // Aggregation
     queryContext =
         QueryContextConverterUtils.getQueryContext("SELECT COUNT(*), SUM(a), MAX(b) FROM testTable WHERE foo = 'bar'");
-    dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable(queryContext);
+    dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable();
     dataSchema = dataTable.getDataSchema();
-    assertEquals(dataSchema.getColumnNames(), new String[]{"count_star", "sum_a", "max_b"});
-    assertEquals(dataSchema.getColumnDataTypes(), new DataSchema.ColumnDataType[]{
-        DataSchema.ColumnDataType.LONG, DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.DOUBLE
+    assertEquals(dataSchema.getColumnNames(), new String[]{"count(*)", "sum(a)", "max(b)"});
+    assertEquals(dataSchema.getColumnDataTypes(), new ColumnDataType[]{
+        ColumnDataType.LONG, ColumnDataType.DOUBLE, ColumnDataType.DOUBLE
     });
     assertEquals(dataTable.getNumberOfRows(), 1);
     assertEquals(dataTable.getLong(0, 0), 0L);
@@ -58,22 +59,22 @@ public class ResultsBlockUtilsTest {
     // Group-by
     queryContext = QueryContextConverterUtils.getQueryContext(
         "SELECT c, d, COUNT(*), SUM(a), MAX(b) FROM testTable WHERE foo = 'bar' GROUP BY c, d");
-    dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable(queryContext);
+    dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable();
     dataSchema = dataTable.getDataSchema();
     assertEquals(dataSchema.getColumnNames(), new String[]{"c", "d", "count(*)", "sum(a)", "max(b)"});
-    assertEquals(dataSchema.getColumnDataTypes(), new DataSchema.ColumnDataType[]{
-        DataSchema.ColumnDataType.STRING, DataSchema.ColumnDataType.STRING, DataSchema.ColumnDataType.LONG,
-        DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.DOUBLE
+    assertEquals(dataSchema.getColumnDataTypes(), new ColumnDataType[]{
+        ColumnDataType.STRING, ColumnDataType.STRING, ColumnDataType.LONG, ColumnDataType.DOUBLE, ColumnDataType.DOUBLE
     });
     assertEquals(dataTable.getNumberOfRows(), 0);
 
     // Distinct
     queryContext = QueryContextConverterUtils.getQueryContext("SELECT DISTINCT a, b FROM testTable WHERE foo = 'bar'");
-    dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable(queryContext);
+    dataTable = ResultsBlockUtils.buildEmptyQueryResults(queryContext).getDataTable();
     dataSchema = dataTable.getDataSchema();
     assertEquals(dataSchema.getColumnNames(), new String[]{"a", "b"});
-    assertEquals(dataSchema.getColumnDataTypes(), new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.STRING,
-        DataSchema.ColumnDataType.STRING});
+    assertEquals(dataSchema.getColumnDataTypes(), new ColumnDataType[]{
+        ColumnDataType.STRING, ColumnDataType.STRING
+    });
     assertEquals(dataTable.getNumberOfRows(), 0);
   }
 }

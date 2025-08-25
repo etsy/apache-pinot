@@ -40,6 +40,8 @@ import org.apache.pinot.core.plan.maker.InstancePlanMakerImplV2;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionFactory;
 import org.apache.pinot.core.util.MemoizedClassAssociation;
+import org.apache.pinot.segment.spi.datasource.DataSource;
+import org.apache.pinot.spi.config.table.FieldConfig;
 
 
 /**
@@ -73,6 +75,7 @@ public class QueryContext {
   private final String _tableName;
   private final QueryContext _subquery;
   private final List<ExpressionContext> _selectExpressions;
+  private final boolean _distinct;
   private final List<String> _aliasList;
   private final FilterContext _filter;
   private final List<ExpressionContext> _groupByExpressions;
@@ -88,10 +91,9 @@ public class QueryContext {
 
   // Pre-calculate the aggregation functions and columns for the query so that it can be shared across all the segments
   private AggregationFunction[] _aggregationFunctions;
-  private Map<FunctionContext, Integer> _aggregationFunctionIndexMap;
-  private boolean _hasFilteredAggregations;
   private List<Pair<AggregationFunction, FilterContext>> _filteredAggregationFunctions;
   private Map<Pair<FunctionContext, FilterContext>, Integer> _filteredAggregationsIndexMap;
+  private boolean _hasFilteredAggregations;
   private Set<String> _columns;
 
   // Other properties to be shared across all the segments
@@ -122,16 +124,21 @@ public class QueryContext {
   private boolean _nullHandlingEnabled;
   // Whether server returns the final result
   private boolean _serverReturnFinalResult;
+  // Whether server returns the final result with unpartitioned group key
+  private boolean _serverReturnFinalResultKeyUnpartitioned;
+  // Collection of index types to skip per column
+  private Map<String, Set<FieldConfig.IndexType>> _skipIndexes;
 
   private QueryContext(@Nullable String tableName, @Nullable QueryContext subquery,
-      List<ExpressionContext> selectExpressions, List<String> aliasList, @Nullable FilterContext filter,
-      @Nullable List<ExpressionContext> groupByExpressions, @Nullable FilterContext havingFilter,
-      @Nullable List<OrderByExpressionContext> orderByExpressions, int limit, int offset,
-      Map<String, String> queryOptions, @Nullable Map<ExpressionContext, ExpressionContext> expressionOverrideHints,
-      boolean explain) {
+      List<ExpressionContext> selectExpressions, boolean distinct, List<String> aliasList,
+      @Nullable FilterContext filter, @Nullable List<ExpressionContext> groupByExpressions,
+      @Nullable FilterContext havingFilter, @Nullable List<OrderByExpressionContext> orderByExpressions, int limit,
+      int offset, Map<String, String> queryOptions,
+      @Nullable Map<ExpressionContext, ExpressionContext> expressionOverrideHints, boolean explain) {
     _tableName = tableName;
     _subquery = subquery;
     _selectExpressions = selectExpressions;
+    _distinct = distinct;
     _aliasList = Collections.unmodifiableList(aliasList);
     _filter = filter;
     _groupByExpressions = groupByExpressions;
@@ -165,6 +172,13 @@ public class QueryContext {
    */
   public List<ExpressionContext> getSelectExpressions() {
     return _selectExpressions;
+  }
+
+  /**
+   * Returns whether the query is a DISTINCT query.
+   */
+  public boolean isDistinct() {
+    return _distinct;
   }
 
   /**
@@ -258,28 +272,19 @@ public class QueryContext {
   }
 
   /**
-   * Returns the filtered aggregation expressions for the query.
-   */
-  public boolean isHasFilteredAggregations() {
-    return _hasFilteredAggregations;
-  }
-
-  /**
-   * Returns a map from the AGGREGATION FunctionContext to the index of the corresponding AggregationFunction in the
-   * aggregation functions array.
-   */
-  @Nullable
-  public Map<FunctionContext, Integer> getAggregationFunctionIndexMap() {
-    return _aggregationFunctionIndexMap;
-  }
-
-  /**
    * Returns a map from the filtered aggregation (pair of AGGREGATION FunctionContext and FILTER FilterContext) to the
    * index of corresponding AggregationFunction in the aggregation functions array.
    */
   @Nullable
   public Map<Pair<FunctionContext, FilterContext>, Integer> getFilteredAggregationsIndexMap() {
     return _filteredAggregationsIndexMap;
+  }
+
+  /**
+   * Returns the filtered aggregation expressions for the query.
+   */
+  public boolean hasFilteredAggregations() {
+    return _hasFilteredAggregations;
   }
 
   /**
@@ -393,6 +398,14 @@ public class QueryContext {
     _serverReturnFinalResult = serverReturnFinalResult;
   }
 
+  public boolean isServerReturnFinalResultKeyUnpartitioned() {
+    return _serverReturnFinalResultKeyUnpartitioned;
+  }
+
+  public void setServerReturnFinalResultKeyUnpartitioned(boolean serverReturnFinalResultKeyUnpartitioned) {
+    _serverReturnFinalResultKeyUnpartitioned = serverReturnFinalResultKeyUnpartitioned;
+  }
+
   /**
    * Gets or computes a value of type {@code V} associated with a key of type {@code K} so that it can be shared
    * within the scope of a query.
@@ -413,16 +426,32 @@ public class QueryContext {
   @Override
   public String toString() {
     return "QueryContext{" + "_tableName='" + _tableName + '\'' + ", _subquery=" + _subquery + ", _selectExpressions="
-        + _selectExpressions + ", _aliasList=" + _aliasList + ", _filter=" + _filter + ", _groupByExpressions="
-        + _groupByExpressions + ", _havingFilter=" + _havingFilter + ", _orderByExpressions=" + _orderByExpressions
-        + ", _limit=" + _limit + ", _offset=" + _offset + ", _queryOptions=" + _queryOptions
+        + _selectExpressions + ", _distinct=" + _distinct + ", _aliasList=" + _aliasList + ", _filter=" + _filter
+        + ", _groupByExpressions=" + _groupByExpressions + ", _havingFilter=" + _havingFilter + ", _orderByExpressions="
+        + _orderByExpressions + ", _limit=" + _limit + ", _offset=" + _offset + ", _queryOptions=" + _queryOptions
         + ", _expressionOverrideHints=" + _expressionOverrideHints + ", _explain=" + _explain + '}';
+  }
+
+  public void setSkipIndexes(Map<String, Set<FieldConfig.IndexType>> skipIndexes) {
+    _skipIndexes = skipIndexes;
+  }
+
+  public boolean isIndexUseAllowed(String columnName, FieldConfig.IndexType indexType) {
+    if (_skipIndexes == null) {
+      return true;
+    }
+    return !_skipIndexes.getOrDefault(columnName, Collections.EMPTY_SET).contains(indexType);
+  }
+
+  public boolean isIndexUseAllowed(DataSource dataSource, FieldConfig.IndexType indexType) {
+    return isIndexUseAllowed(dataSource.getColumnName(), indexType);
   }
 
   public static class Builder {
     private String _tableName;
     private QueryContext _subquery;
     private List<ExpressionContext> _selectExpressions;
+    private boolean _distinct;
     private List<String> _aliasList;
     private FilterContext _filter;
     private List<ExpressionContext> _groupByExpressions;
@@ -431,7 +460,6 @@ public class QueryContext {
     private int _limit;
     private int _offset;
     private Map<String, String> _queryOptions;
-    private Map<String, String> _debugOptions;
     private Map<ExpressionContext, ExpressionContext> _expressionOverrideHints;
     private boolean _explain;
 
@@ -447,6 +475,11 @@ public class QueryContext {
 
     public Builder setSelectExpressions(List<ExpressionContext> selectExpressions) {
       _selectExpressions = selectExpressions;
+      return this;
+    }
+
+    public Builder setDistinct(boolean distinct) {
+      _distinct = distinct;
       return this;
     }
 
@@ -507,10 +540,13 @@ public class QueryContext {
         _queryOptions = Collections.emptyMap();
       }
       QueryContext queryContext =
-          new QueryContext(_tableName, _subquery, _selectExpressions, _aliasList, _filter, _groupByExpressions,
-              _havingFilter, _orderByExpressions, _limit, _offset, _queryOptions, _expressionOverrideHints, _explain);
+          new QueryContext(_tableName, _subquery, _selectExpressions, _distinct, _aliasList, _filter,
+              _groupByExpressions, _havingFilter, _orderByExpressions, _limit, _offset, _queryOptions,
+              _expressionOverrideHints, _explain);
       queryContext.setNullHandlingEnabled(QueryOptionsUtils.isNullHandlingEnabled(_queryOptions));
       queryContext.setServerReturnFinalResult(QueryOptionsUtils.isServerReturnFinalResult(_queryOptions));
+      queryContext.setServerReturnFinalResultKeyUnpartitioned(
+          QueryOptionsUtils.isServerReturnFinalResultKeyUnpartitioned(_queryOptions));
 
       // Pre-calculate the aggregation functions and columns for the query
       generateAggregationFunctions(queryContext);
@@ -536,15 +572,11 @@ public class QueryContext {
         FunctionContext aggregation = pair.getLeft();
         FilterContext filter = pair.getRight();
         if (filter != null) {
-          // Filtered aggregation
-          if (_groupByExpressions != null) {
-            throw new IllegalStateException("GROUP BY with FILTER clauses is not supported");
-          }
           queryContext._hasFilteredAggregations = true;
         }
         int functionIndex = filteredAggregationFunctions.size();
         AggregationFunction aggregationFunction =
-            AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext);
+            AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
         filteredAggregationFunctions.add(Pair.of(aggregationFunction, filter));
         filteredAggregationsIndexMap.put(Pair.of(aggregation, filter), functionIndex);
       }
@@ -565,7 +597,7 @@ public class QueryContext {
           FilterContext filter = pair.getRight();
           int functionIndex = filteredAggregationFunctions.size();
           AggregationFunction aggregationFunction =
-              AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext);
+              AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
           filteredAggregationFunctions.add(Pair.of(aggregationFunction, filter));
           filteredAggregationsIndexMap.put(Pair.of(aggregation, filter), functionIndex);
         }
@@ -577,12 +609,7 @@ public class QueryContext {
         for (int i = 0; i < numAggregations; i++) {
           aggregationFunctions[i] = filteredAggregationFunctions.get(i).getLeft();
         }
-        Map<FunctionContext, Integer> aggregationFunctionIndexMap = new HashMap<>();
-        for (Map.Entry<Pair<FunctionContext, FilterContext>, Integer> entry : filteredAggregationsIndexMap.entrySet()) {
-          aggregationFunctionIndexMap.put(entry.getKey().getLeft(), entry.getValue());
-        }
         queryContext._aggregationFunctions = aggregationFunctions;
-        queryContext._aggregationFunctionIndexMap = aggregationFunctionIndexMap;
         queryContext._filteredAggregationFunctions = filteredAggregationFunctions;
         queryContext._filteredAggregationsIndexMap = filteredAggregationsIndexMap;
       }

@@ -21,7 +21,7 @@ package org.apache.pinot.segment.local.io.util;
 import java.io.File;
 import java.io.IOException;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.RandomStringUtils;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -80,7 +80,7 @@ public class VarLengthValueReaderWriterTest {
       try (VarLengthValueReader reader = new VarLengthValueReader(dataBuffer)) {
         assertEquals(reader.getNumValues(), 1);
         byte[] buffer = new byte[MAX_STRING_LENGTH];
-        assertEquals(reader.getUnpaddedString(0, MAX_STRING_LENGTH, (byte) 0, buffer), value);
+        assertEquals(reader.getUnpaddedString(0, MAX_STRING_LENGTH, buffer), value);
         assertEquals(reader.getBytes(0, MAX_STRING_LENGTH), valueBytes);
       }
     }
@@ -108,7 +108,7 @@ public class VarLengthValueReaderWriterTest {
         assertEquals(reader.getNumValues(), NUM_VALUES);
         byte[] buffer = new byte[MAX_STRING_LENGTH];
         for (int i = 0; i < NUM_VALUES; i++) {
-          assertEquals(reader.getUnpaddedString(i, MAX_STRING_LENGTH, (byte) 0, buffer), values[i]);
+          assertEquals(reader.getUnpaddedString(i, MAX_STRING_LENGTH, buffer), values[i]);
           assertEquals(reader.getBytes(i, MAX_STRING_LENGTH), valueBytesArray[i]);
         }
       }

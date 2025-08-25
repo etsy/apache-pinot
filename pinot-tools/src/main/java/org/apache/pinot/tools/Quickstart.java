@@ -23,7 +23,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.tools.admin.PinotAdministrator;
@@ -59,14 +59,15 @@ public class Quickstart extends QuickStartBase {
 
   public void execute()
       throws Exception {
-    File quickstartTmpDir = new File(_dataDir, String.valueOf(System.currentTimeMillis()));
+    File quickstartTmpDir =
+        _setCustomDataDir ? _dataDir : new File(_dataDir, String.valueOf(System.currentTimeMillis()));
     File quickstartRunnerDir = new File(quickstartTmpDir, "quickstart");
     Preconditions.checkState(quickstartRunnerDir.mkdirs());
     List<QuickstartTableRequest> quickstartTableRequests = bootstrapOfflineTableDirectories(quickstartTmpDir);
 
     QuickstartRunner runner =
         new QuickstartRunner(quickstartTableRequests, 1, 1, getNumQuickstartRunnerServers(), 1, quickstartRunnerDir,
-            true, getAuthProvider(), getConfigOverrides(), null, true);
+            true, getAuthProvider(), getConfigOverrides(), _zkExternalAddress, true);
 
     printStatus(Color.CYAN, "***** Starting Zookeeper, controller, broker, server and minion *****");
     runner.startAll();
@@ -136,6 +137,8 @@ public class Quickstart extends QuickStartBase {
     printStatus(Color.CYAN, "Query : " + q5);
     printStatus(Color.YELLOW, prettyPrintResponse(runner.runQuery(q5)));
     printStatus(Color.GREEN, "***************************************************");
+
+    runVectorQueryExamples(runner);
   }
 
   public static void main(String[] args)

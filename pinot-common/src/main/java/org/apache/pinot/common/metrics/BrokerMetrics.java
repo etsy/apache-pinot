@@ -20,6 +20,8 @@ package org.apache.pinot.common.metrics;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.pinot.spi.metrics.NoopPinotMetricsRegistry;
 import org.apache.pinot.spi.metrics.PinotMetricsRegistry;
 
 import static org.apache.pinot.spi.utils.CommonConstants.Broker.DEFAULT_ENABLE_TABLE_LEVEL_METRICS;
@@ -31,6 +33,23 @@ import static org.apache.pinot.spi.utils.CommonConstants.Broker.DEFAULT_METRICS_
  *
  */
 public class BrokerMetrics extends AbstractMetrics<BrokerQueryPhase, BrokerMeter, BrokerGauge, BrokerTimer> {
+
+  private static final BrokerMetrics NOOP = new BrokerMetrics(new NoopPinotMetricsRegistry());
+  private static final AtomicReference<BrokerMetrics> BROKER_METRICS_INSTANCE = new AtomicReference<>(NOOP);
+
+  /**
+   * register the brokerMetrics onto this class, so that we don't need to pass it down as a parameter
+   */
+  public static boolean register(BrokerMetrics brokerMetrics) {
+    return BROKER_METRICS_INSTANCE.compareAndSet(NOOP, brokerMetrics);
+  }
+
+  /**
+   * should always call after registration
+   */
+  public static BrokerMetrics get() {
+    return BROKER_METRICS_INSTANCE.get();
+  }
 
   /**
    * Constructs the broker metrics.
@@ -61,6 +80,7 @@ public class BrokerMetrics extends AbstractMetrics<BrokerQueryPhase, BrokerMeter
     return BrokerMeter.values();
   }
 
+  @Override
   protected BrokerGauge[] getGauges() {
     return BrokerGauge.values();
   }

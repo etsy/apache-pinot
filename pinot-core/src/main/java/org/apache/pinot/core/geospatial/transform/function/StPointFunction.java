@@ -21,14 +21,17 @@ package org.apache.pinot.core.geospatial.transform.function;
 import com.google.common.base.Preconditions;
 import java.util.List;
 import java.util.Map;
-import org.apache.pinot.core.operator.blocks.ProjectionBlock;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
 import org.apache.pinot.core.operator.transform.function.BaseTransformFunction;
 import org.apache.pinot.core.operator.transform.function.LiteralTransformFunction;
 import org.apache.pinot.core.operator.transform.function.TransformFunction;
 import org.apache.pinot.core.plan.DocIdSetPlanNode;
-import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.spi.utils.BooleanUtils;
+import org.apache.pinot.segment.local.utils.GeometrySerializer;
+import org.apache.pinot.segment.local.utils.GeometryUtils;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Point;
 
 
 /**
@@ -47,7 +50,8 @@ public class StPointFunction extends BaseTransformFunction {
   }
 
   @Override
-  public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
+  public void init(List<TransformFunction> arguments, Map<String, ColumnContext> columnContextMap) {
+    super.init(arguments, columnContextMap);
     Preconditions.checkArgument(arguments.size() == 2 || arguments.size() == 3,
         "2 or 3 arguments are required for transform function: %s", getName());
     TransformFunction transformFunction = arguments.get(0);
@@ -61,8 +65,8 @@ public class StPointFunction extends BaseTransformFunction {
     if (arguments.size() == 3) {
       transformFunction = arguments.get(2);
       Preconditions.checkArgument(transformFunction instanceof LiteralTransformFunction,
-          "Third argument must be a literal of integer: %s", getName());
-      _isGeography = BooleanUtils.toBoolean(((LiteralTransformFunction) transformFunction).getLiteral());
+          "Third argument must be a literal of boolean: %s", getName());
+      _isGeography = ((LiteralTransformFunction) transformFunction).getBooleanLiteral();
     }
   }
 
@@ -72,14 +76,18 @@ public class StPointFunction extends BaseTransformFunction {
   }
 
   @Override
-  public byte[][] transformToBytesValuesSV(ProjectionBlock projectionBlock) {
+  public byte[][] transformToBytesValuesSV(ValueBlock valueBlock) {
     if (_results == null) {
       _results = new byte[DocIdSetPlanNode.MAX_DOC_PER_CALL][];
     }
-    double[] firstValues = _firstArgument.transformToDoubleValuesSV(projectionBlock);
-    double[] secondValues = _secondArgument.transformToDoubleValuesSV(projectionBlock);
-    for (int i = 0; i < projectionBlock.getNumDocs(); i++) {
-      _results[i] = ScalarFunctions.stPoint(firstValues[i], secondValues[i], _isGeography);
+    double[] firstValues = _firstArgument.transformToDoubleValuesSV(valueBlock);
+    double[] secondValues = _secondArgument.transformToDoubleValuesSV(valueBlock);
+    for (int i = 0; i < valueBlock.getNumDocs(); i++) {
+      Point point = GeometryUtils.GEOMETRY_FACTORY.createPoint(new Coordinate(firstValues[i], secondValues[i]));
+      if (_isGeography) {
+        GeometryUtils.setGeography(point);
+      }
+      _results[i] = GeometrySerializer.serialize(point);
     }
     return _results;
   }

@@ -18,7 +18,7 @@
  */
 package org.apache.pinot.core.operator.blocks.results;
 
-import java.util.Collection;
+import java.util.List;
 import javax.annotation.Nullable;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.utils.DataSchema;
@@ -35,18 +35,24 @@ public class MetadataResultsBlock extends BaseResultsBlock {
 
   @Nullable
   @Override
-  public DataSchema getDataSchema(QueryContext queryContext) {
+  public QueryContext getQueryContext() {
     return null;
   }
 
   @Nullable
   @Override
-  public Collection<Object[]> getRows(QueryContext queryContext) {
+  public DataSchema getDataSchema() {
+    return null;
+  }
+
+  @Nullable
+  @Override
+  public List<Object[]> getRows() {
     return null;
   }
 
   @Override
-  public DataTable getDataTable(QueryContext queryContext) {
+  public DataTable getDataTable() {
     return DataTableBuilderFactory.getEmptyDataTable();
   }
 }

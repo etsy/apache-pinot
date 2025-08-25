@@ -32,6 +32,7 @@ public class StarTreeV2Constants {
   // File names before combining
   public static final String STAR_TREE_TEMP_DIR = "star_tree_tmp";
   public static final String STAR_TREE_INDEX_FILE_NAME = "star_tree.index";
+  public static final String EXISTING_STAR_TREE_TEMP_DIR = "existing_star_tree_tmp";
 
   // NOTE: because of bit compression, we cannot store -1 for star in forward index. Because star value should never be
   // accessed, we can simply put 0 as the place holder
@@ -48,6 +49,15 @@ public class StarTreeV2Constants {
     public static final String FUNCTION_COLUMN_PAIRS = "function.column.pairs";
     public static final String MAX_LEAF_RECORDS = "max.leaf.records";
     public static final String SKIP_STAR_NODE_CREATION_FOR_DIMENSIONS = "skip.star.node.creation";
+    public static final String AGGREGATION_COUNT = "aggregation.count";
+    public static final String AGGREGATION_PREFIX = "aggregation.";
+    public static final String FUNCTION_TYPE = "function.type";
+    public static final String COLUMN_NAME = "column.name";
+    public static final String INDEX_VERSION = "index.version";
+    public static final String COMPRESSION_CODEC = "compression.codec";
+    public static final String DERIVE_NUM_DOCS_PER_CHUNK = "derive.num.docs.per.chunk";
+    public static final String TARGET_MAX_CHUNK_SIZE_BYTES = "target.max.chunk.size.bytes";
+    public static final String TARGET_DOCS_PER_CHUNK = "target.docs.per.chunk";
 
     public static String getStarTreePrefix(int index) {
       return STAR_TREE_PREFIX + index;

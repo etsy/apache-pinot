@@ -39,7 +39,6 @@ import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
 
-
 /**
  * Tests ingestion configs on a hybrid table
  */
@@ -152,9 +151,10 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
     waitForAllDocsLoaded(600_000L);
   }
 
-  @Test
-  public void testQueries()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testQueries(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
     // Select column created with transform function
     String sqlQuery = "Select millisSinceEpoch from " + DEFAULT_TABLE_NAME;
     JsonNode response = postQuery(sqlQuery);

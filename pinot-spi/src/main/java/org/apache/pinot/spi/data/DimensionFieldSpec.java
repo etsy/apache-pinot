@@ -20,7 +20,7 @@ package org.apache.pinot.spi.data;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -31,34 +31,38 @@ public final class DimensionFieldSpec extends FieldSpec {
     super();
   }
 
-  public DimensionFieldSpec(@Nonnull String name, @Nonnull DataType dataType, boolean isSingleValueField) {
+  public DimensionFieldSpec(String name, DataType dataType, boolean isSingleValueField) {
     super(name, dataType, isSingleValueField);
   }
 
-  public DimensionFieldSpec(@Nonnull String name, @Nonnull DataType dataType, boolean isSingleValueField,
-      @Nonnull Object defaultNullValue) {
+  public DimensionFieldSpec(String name, DataType dataType, boolean isSingleValueField,
+      @Nullable Object defaultNullValue) {
     super(name, dataType, isSingleValueField, defaultNullValue);
   }
 
-  public DimensionFieldSpec(@Nonnull String name, @Nonnull DataType dataType, boolean isSingleValueField, int maxLength,
-      @Nonnull Object defaultNullValue) {
+  public DimensionFieldSpec(String name, DataType dataType, boolean isSingleValueField, int maxLength,
+      @Nullable Object defaultNullValue) {
     super(name, dataType, isSingleValueField, maxLength, defaultNullValue);
   }
 
-  public DimensionFieldSpec(@Nonnull String name, @Nonnull DataType dataType, boolean isSingleValueField,
+  public DimensionFieldSpec(String name, DataType dataType, boolean isSingleValueField, int maxLength,
+      @Nullable Object defaultNullValue, @Nullable MaxLengthExceedStrategy maxLengthExceedStrategy) {
+    super(name, dataType, isSingleValueField, maxLength, defaultNullValue, maxLengthExceedStrategy);
+  }
+
+  public DimensionFieldSpec(String name, DataType dataType, boolean isSingleValueField,
       Class virtualColumnProviderClass) {
     super(name, dataType, isSingleValueField);
     _virtualColumnProvider = virtualColumnProviderClass.getName();
   }
 
-  public DimensionFieldSpec(@Nonnull String name, @Nonnull DataType dataType, boolean isSingleValueField,
-      Class virtualColumnProviderClass, Object defaultNullValue) {
+  public DimensionFieldSpec(String name, DataType dataType, boolean isSingleValueField,
+      Class virtualColumnProviderClass, @Nullable Object defaultNullValue) {
     super(name, dataType, isSingleValueField, defaultNullValue);
     _virtualColumnProvider = virtualColumnProviderClass.getName();
   }
 
   @JsonIgnore
-  @Nonnull
   @Override
   public FieldType getFieldType() {
     return FieldType.DIMENSION;
@@ -67,6 +71,7 @@ public final class DimensionFieldSpec extends FieldSpec {
   @Override
   public String toString() {
     return "< field type: DIMENSION, field name: " + _name + ", data type: " + _dataType + ", is single-value field: "
-        + _isSingleValueField + ", default null value: " + _defaultNullValue + " >";
+        + _isSingleValueField + ", default null value: " + _defaultNullValue + ", max length exceed strategy: "
+        + _maxLengthExceedStrategy + " >";
   }
 }

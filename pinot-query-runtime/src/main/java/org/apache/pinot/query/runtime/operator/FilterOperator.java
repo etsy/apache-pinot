@@ -18,18 +18,21 @@
  */
 package org.apache.pinot.query.runtime.operator;
 
+import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.List;
-import javax.annotation.Nullable;
 import org.apache.pinot.common.datablock.DataBlock;
+import org.apache.pinot.common.datatable.StatMap;
 import org.apache.pinot.common.utils.DataSchema;
-import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.BaseOperator;
-import org.apache.pinot.query.planner.logical.RexExpression;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
+import org.apache.pinot.query.planner.plannode.FilterNode;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
-import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
 import org.apache.pinot.query.runtime.operator.operands.TransformOperand;
-import org.apache.pinot.query.runtime.operator.utils.FunctionInvokeUtils;
+import org.apache.pinot.query.runtime.operator.operands.TransformOperandFactory;
+import org.apache.pinot.query.runtime.plan.OpChainExecutionContext;
+import org.apache.pinot.spi.utils.BooleanUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /*
@@ -45,27 +48,46 @@ import org.apache.pinot.query.runtime.operator.utils.FunctionInvokeUtils;
     3) All boolean scalar functions we have that take tranformOperand.
     Note: Scalar functions are the ones we have in v1 engine and only do function name and arg # matching.
  */
-public class FilterOperator extends BaseOperator<TransferableBlock> {
+public class FilterOperator extends MultiStageOperator {
+
+  private static final Logger LOGGER = LoggerFactory.getLogger(FilterOperator.class);
   private static final String EXPLAIN_NAME = "FILTER";
-  private final Operator<TransferableBlock> _upstreamOperator;
+
+  private final MultiStageOperator _input;
   private final TransformOperand _filterOperand;
   private final DataSchema _dataSchema;
-  private TransferableBlock _upstreamErrorBlock;
+  private final StatMap<StatKey> _statMap = new StatMap<>(StatKey.class);
 
-  public FilterOperator(Operator<TransferableBlock> upstreamOperator, DataSchema dataSchema, RexExpression filter) {
-    _upstreamOperator = upstreamOperator;
-    _dataSchema = dataSchema;
-    _filterOperand = TransformOperand.toTransformOperand(filter, dataSchema);
-    _upstreamErrorBlock = null;
+  public FilterOperator(OpChainExecutionContext context, MultiStageOperator input, FilterNode node) {
+    super(context);
+    _input = input;
+    _dataSchema = node.getDataSchema();
+    _filterOperand = TransformOperandFactory.getTransformOperand(node.getCondition(), _dataSchema);
+    Preconditions.checkState(_filterOperand.getResultType() == ColumnDataType.BOOLEAN,
+        "Filter operand must return BOOLEAN, got: %s", _filterOperand.getResultType());
   }
 
   @Override
-  public List<Operator> getChildOperators() {
-    // WorkerExecutor doesn't use getChildOperators, returns null here.
-    return null;
+  public void registerExecution(long time, int numRows) {
+    _statMap.merge(StatKey.EXECUTION_TIME_MS, time);
+    _statMap.merge(StatKey.EMITTED_ROWS, numRows);
   }
 
-  @Nullable
+  @Override
+  public Type getOperatorType() {
+    return Type.FILTER;
+  }
+
+  @Override
+  protected Logger logger() {
+    return LOGGER;
+  }
+
+  @Override
+  public List<MultiStageOperator> getChildOperators() {
+    return List.of(_input);
+  }
+
   @Override
   public String toExplainString() {
     return EXPLAIN_NAME;
@@ -73,32 +95,48 @@ public class FilterOperator extends BaseOperator<TransferableBlock> {
 
   @Override
   protected TransferableBlock getNextBlock() {
-    try {
-      return transform(_upstreamOperator.nextBlock());
-    } catch (Exception e) {
-      return TransferableBlockUtils.getErrorTransferableBlock(e);
+    TransferableBlock block = _input.nextBlock();
+    if (block.isEndOfStreamBlock()) {
+      if (block.isErrorBlock()) {
+        return block;
+      }
+      return updateEosBlock(block, _statMap);
     }
-  }
-
-  @SuppressWarnings("ConstantConditions")
-  private TransferableBlock transform(TransferableBlock block)
-      throws Exception {
-    if (_upstreamErrorBlock != null) {
-      return _upstreamErrorBlock;
-    } else if (block.isErrorBlock()) {
-      _upstreamErrorBlock = block;
-      return _upstreamErrorBlock;
-    } else if (TransferableBlockUtils.isEndOfStream(block) || TransferableBlockUtils.isNoOpBlock(block)) {
-      return block;
-    }
-
     List<Object[]> resultRows = new ArrayList<>();
-    List<Object[]> container = block.getContainer();
-    for (Object[] row : container) {
-      if ((Boolean) FunctionInvokeUtils.convert(_filterOperand.apply(row), DataSchema.ColumnDataType.BOOLEAN)) {
+    for (Object[] row : block.getContainer()) {
+      Object filterResult = _filterOperand.apply(row);
+      if (BooleanUtils.isTrueInternalValue(filterResult)) {
         resultRows.add(row);
       }
     }
     return new TransferableBlock(resultRows, _dataSchema, DataBlock.Type.ROW);
+  }
+
+  public enum StatKey implements StatMap.Key {
+    //@formatter:off
+    EXECUTION_TIME_MS(StatMap.Type.LONG) {
+      @Override
+      public boolean includeDefaultInJson() {
+        return true;
+      }
+    },
+    EMITTED_ROWS(StatMap.Type.LONG) {
+      @Override
+      public boolean includeDefaultInJson() {
+        return true;
+      }
+    };
+    //@formatter:on
+
+    private final StatMap.Type _type;
+
+    StatKey(StatMap.Type type) {
+      _type = type;
+    }
+
+    @Override
+    public StatMap.Type getType() {
+      return _type;
+    }
   }
 }

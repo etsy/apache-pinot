@@ -23,6 +23,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.StringJoiner;
 import org.apache.http.client.utils.URIBuilder;
@@ -71,6 +72,19 @@ public class URIUtils {
   }
 
   /**
+   * Returns the last part for the given path split by the file separator.
+   * If the file separator is not found, returns the whole path as the last part.
+   */
+  public static String getLastPart(String path) {
+    if (path == null) {
+      return null;
+    }
+    int parameterIndex = path.indexOf("?");
+    path = parameterIndex >= 0 ? path.substring(0, parameterIndex) : path;
+    return path.substring(path.lastIndexOf(File.separator) + 1);
+  }
+
+  /**
    * Returns the download URL with the segment name encoded.
    */
   public static String constructDownloadUrl(String baseUrl, String rawTableName, String segmentName) {
@@ -78,21 +92,11 @@ public class URIUtils {
   }
 
   public static String encode(String string) {
-    try {
-      return URLEncoder.encode(string, "UTF-8");
-    } catch (Exception e) {
-      // Should never happen
-      throw new RuntimeException(e);
-    }
+    return URLEncoder.encode(string, StandardCharsets.UTF_8);
   }
 
   public static String decode(String string) {
-    try {
-      return URLDecoder.decode(string, "UTF-8");
-    } catch (Exception e) {
-      // Should never happen
-      throw new RuntimeException(e);
-    }
+    return URLDecoder.decode(string, StandardCharsets.UTF_8);
   }
 
   /**

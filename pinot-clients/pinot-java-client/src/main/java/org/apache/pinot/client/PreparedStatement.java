@@ -18,7 +18,7 @@
  */
 package org.apache.pinot.client;
 
-import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
 
 
 /**
@@ -33,11 +33,6 @@ public class PreparedStatement {
     _connection = connection;
     _statement = query;
     _parameters = new String[getQuestionMarkCount(query)];
-  }
-
-  @Deprecated
-  PreparedStatement(Connection connection, Request request) {
-    this(connection, request.getQuery());
   }
 
   private int getQuestionMarkCount(String query) {
@@ -72,7 +67,7 @@ public class PreparedStatement {
    *
    * @return The query results
    */
-  public Future<ResultSetGroup> executeAsync() {
+  public CompletableFuture<ResultSetGroup> executeAsync() {
     return _connection.executeAsync(fillStatementWithParameters());
   }
 

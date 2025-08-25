@@ -36,6 +36,7 @@ import org.apache.pinot.spi.annotations.minion.TaskGenerator;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableTaskConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.TimeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,11 +60,6 @@ public class PurgeTaskGenerator extends BaseTaskGenerator {
     for (TableConfig tableConfig : tableConfigs) {
 
       String tableName = tableConfig.getTableName();
-      if (tableConfig.getTableType() == TableType.REALTIME) {
-        LOGGER.warn("Skip generating task: {} for real-time table: {}", taskType, tableName);
-        continue;
-      }
-
       Map<String, String> taskConfigs;
       TableTaskConfig tableTaskConfig = tableConfig.getTaskConfig();
       if (tableTaskConfig == null) {
@@ -71,7 +67,7 @@ public class PurgeTaskGenerator extends BaseTaskGenerator {
         continue;
       }
       taskConfigs = tableTaskConfig.getConfigsForTaskType(MinionConstants.PurgeTask.TASK_TYPE);
-      Preconditions.checkNotNull(taskConfigs, "Task config shouldn't be null for Table: {}", tableName);
+      Preconditions.checkNotNull(taskConfigs, "Task config shouldn't be null for Table: %s", tableName);
 
       String deltaTimePeriod =
           taskConfigs.getOrDefault(MinionConstants.PurgeTask.LAST_PURGE_TIME_THREESOLD_PERIOD,
@@ -92,18 +88,30 @@ public class PurgeTaskGenerator extends BaseTaskGenerator {
       } else {
         tableMaxNumTasks = Integer.MAX_VALUE;
       }
-      List<SegmentZKMetadata> offlineSegmentsZKMetadata = _clusterInfoAccessor.getSegmentsZKMetadata(tableName);
+      List<SegmentZKMetadata> segmentsZKMetadata = new ArrayList<>();
+      if (tableConfig.getTableType() == TableType.REALTIME) {
+        List<SegmentZKMetadata> segmentsZKMetadataAll = getSegmentsZKMetadataForTable(tableName);
+        for (SegmentZKMetadata segmentZKMetadata : segmentsZKMetadataAll) {
+          CommonConstants.Segment.Realtime.Status status = segmentZKMetadata.getStatus();
+          if (status.isCompleted()) {
+            segmentsZKMetadata.add(segmentZKMetadata);
+          }
+        }
+      } else {
+        segmentsZKMetadata = getSegmentsZKMetadataForTable(tableName);
+      }
+
       List<SegmentZKMetadata> purgedSegmentsZKMetadata = new ArrayList<>();
       List<SegmentZKMetadata> notpurgedSegmentsZKMetadata = new ArrayList<>();
 
-      for (SegmentZKMetadata segmentMetadata: offlineSegmentsZKMetadata) {
+      for (SegmentZKMetadata segmentMetadata : segmentsZKMetadata) {
 
-       if (segmentMetadata.getCustomMap() != null && segmentMetadata.getCustomMap().containsKey(
-           MinionConstants.PurgeTask.TASK_TYPE + MinionConstants.TASK_TIME_SUFFIX)) {
-         purgedSegmentsZKMetadata.add(segmentMetadata);
-       } else {
-         notpurgedSegmentsZKMetadata.add(segmentMetadata);
-       }
+        if (segmentMetadata.getCustomMap() != null && segmentMetadata.getCustomMap()
+            .containsKey(MinionConstants.PurgeTask.TASK_TYPE + MinionConstants.TASK_TIME_SUFFIX)) {
+          purgedSegmentsZKMetadata.add(segmentMetadata);
+        } else {
+          notpurgedSegmentsZKMetadata.add(segmentMetadata);
+        }
       }
       Collections.sort(purgedSegmentsZKMetadata, Comparator.comparing(
           segmentZKMetadata -> segmentZKMetadata.getCustomMap()
@@ -111,13 +119,12 @@ public class PurgeTaskGenerator extends BaseTaskGenerator {
           Comparator.nullsFirst(Comparator.naturalOrder())));
       //add already purged segment at the end
       notpurgedSegmentsZKMetadata.addAll(purgedSegmentsZKMetadata);
-
       int tableNumTasks = 0;
       Set<Segment> runningSegments =
           TaskGeneratorUtils.getRunningSegments(MinionConstants.PurgeTask.TASK_TYPE, _clusterInfoAccessor);
       for (SegmentZKMetadata segmentZKMetadata : notpurgedSegmentsZKMetadata) {
-        Map<String, String> configs = new HashMap<>();
         String segmentName = segmentZKMetadata.getSegmentName();
+        Map<String, String> configs = new HashMap<>(getBaseTaskConfigs(tableConfig, List.of(segmentName)));
         Long tsLastPurge;
         if (segmentZKMetadata.getCustomMap() != null) {
           tsLastPurge = Long.valueOf(segmentZKMetadata.getCustomMap()
@@ -137,8 +144,6 @@ public class PurgeTaskGenerator extends BaseTaskGenerator {
         if (tableNumTasks == tableMaxNumTasks) {
           break;
         }
-        configs.put(MinionConstants.TABLE_NAME_KEY, tableName);
-        configs.put(MinionConstants.SEGMENT_NAME_KEY, segmentName);
         configs.put(MinionConstants.DOWNLOAD_URL_KEY, segmentZKMetadata.getDownloadUrl());
         configs.put(MinionConstants.UPLOAD_URL_KEY, _clusterInfoAccessor.getVipUrl() + "/segments");
         configs.put(MinionConstants.ORIGINAL_SEGMENT_CRC_KEY, String.valueOf(segmentZKMetadata.getCrc()));

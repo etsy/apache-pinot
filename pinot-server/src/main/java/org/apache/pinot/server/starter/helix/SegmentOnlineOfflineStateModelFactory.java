@@ -18,24 +18,18 @@
  */
 package org.apache.pinot.server.starter.helix;
 
-import com.google.common.base.Preconditions;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import java.util.concurrent.TimeUnit;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.model.Message;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateModelInfo;
 import org.apache.helix.participant.statemachine.Transition;
-import org.apache.pinot.common.Utils;
-import org.apache.pinot.common.metadata.ZKMetadataProvider;
-import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
-import org.apache.pinot.common.restlet.resources.SegmentErrorInfo;
-import org.apache.pinot.common.utils.LLCSegmentName;
-import org.apache.pinot.common.utils.SegmentName;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
-import org.apache.pinot.core.data.manager.realtime.LLRealtimeSegmentDataManager;
-import org.apache.pinot.segment.local.data.manager.SegmentDataManager;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
-import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,6 +42,13 @@ import org.slf4j.LoggerFactory;
  * 3. Delete an existed segment.
  */
 public class SegmentOnlineOfflineStateModelFactory extends StateModelFactory<StateModel> {
+  // NOTE: Helix might process CONSUMING -> DROPPED transition as 2 separate transitions: CONSUMING -> OFFLINE followed
+  // by OFFLINE -> DROPPED. Use this cache to track the segments that just went through CONSUMING -> OFFLINE transition
+  // to detect CONSUMING -> DROPPED transition.
+  // TODO: Check how Helix handle CONSUMING -> DROPPED transition and remove this cache if it's not needed.
+  private final Cache<Pair<String, String>, Boolean> _recentlyOffloadedConsumingSegments =
+      CacheBuilder.newBuilder().expireAfterWrite(10, TimeUnit.MINUTES).build();
+
   private final String _instanceId;
   private final InstanceDataManager _instanceDataManager;
 
@@ -71,154 +72,110 @@ public class SegmentOnlineOfflineStateModelFactory extends StateModelFactory<Sta
   @SuppressWarnings("unused")
   @StateModelInfo(states = "{'OFFLINE','ONLINE', 'CONSUMING', 'DROPPED'}", initialState = "OFFLINE")
   public class SegmentOnlineOfflineStateModel extends StateModel {
-    private final Logger _logger = LoggerFactory.getLogger(_instanceId + " - " + getClass().getName());
+    private final Logger _logger = LoggerFactory.getLogger(_instanceId + " - SegmentOnlineOfflineStateModel");
 
     @Transition(from = "OFFLINE", to = "CONSUMING")
-    public void onBecomeConsumingFromOffline(Message message, NotificationContext context) {
-      Preconditions.checkState(SegmentName.isLowLevelConsumerSegmentName(message.getPartitionName()),
-          "Tried to go into CONSUMING state on non-low level segment");
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeConsumingFromOffline() : " + message);
-      // We do the same processing as usual for going to the consuming state, which adds the segment to the table data
-      // manager and starts Kafka consumption
-      onBecomeOnlineFromOffline(message, context);
+    public void onBecomeConsumingFromOffline(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeConsumingFromOffline() : {}", message);
+      _instanceDataManager.addConsumingSegment(message.getResourceName(), message.getPartitionName());
     }
 
     @Transition(from = "CONSUMING", to = "ONLINE")
-    public void onBecomeOnlineFromConsuming(Message message, NotificationContext context) {
-      String realtimeTableName = message.getResourceName();
-      String segmentNameStr = message.getPartitionName();
-      LLCSegmentName segmentName = new LLCSegmentName(segmentNameStr);
-
-      TableDataManager tableDataManager = _instanceDataManager.getTableDataManager(realtimeTableName);
-      Preconditions.checkNotNull(tableDataManager);
-      SegmentDataManager acquiredSegment = tableDataManager.acquireSegment(segmentNameStr);
-      // For this transition to be correct in helix, we should already have a segment that is consuming
-      if (acquiredSegment == null) {
-        throw new RuntimeException("Segment " + segmentNameStr + " + not present ");
-      }
-
-      try {
-        if (!(acquiredSegment instanceof LLRealtimeSegmentDataManager)) {
-          // We found a LLC segment that is not consuming right now, must be that we already swapped it with a
-          // segment that has been built. Nothing to do for this state transition.
-          _logger
-              .info("Segment {} not an instance of LLRealtimeSegmentDataManager. Reporting success for the transition",
-                  acquiredSegment.getSegmentName());
-          return;
-        }
-        LLRealtimeSegmentDataManager segmentDataManager = (LLRealtimeSegmentDataManager) acquiredSegment;
-        SegmentZKMetadata segmentZKMetadata = ZKMetadataProvider
-            .getSegmentZKMetadata(_instanceDataManager.getPropertyStore(), realtimeTableName, segmentNameStr);
-        segmentDataManager.goOnlineFromConsuming(segmentZKMetadata);
-      } catch (InterruptedException e) {
-        String errorMessage = String.format("State transition interrupted for segment %s.", segmentNameStr);
-        _logger.warn(errorMessage, e);
-        tableDataManager
-            .addSegmentError(segmentNameStr, new SegmentErrorInfo(System.currentTimeMillis(), errorMessage, e));
-        throw new RuntimeException(e);
-      } finally {
-        tableDataManager.releaseSegment(acquiredSegment);
-      }
+    public void onBecomeOnlineFromConsuming(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOnlineFromConsuming() : {}", message);
+      _instanceDataManager.addOnlineSegment(message.getResourceName(), message.getPartitionName());
     }
 
     @Transition(from = "CONSUMING", to = "OFFLINE")
-    public void onBecomeOfflineFromConsuming(Message message, NotificationContext context) {
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOfflineFromConsuming() : " + message);
+    public void onBecomeOfflineFromConsuming(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOfflineFromConsuming() : {}", message);
       String realtimeTableName = message.getResourceName();
       String segmentName = message.getPartitionName();
-      try {
-        _instanceDataManager.offloadSegment(realtimeTableName, segmentName);
-      } catch (Exception e) {
-        _logger.error("Caught exception in state transition from CONSUMING -> OFFLINE for resource: {}, partition: {}",
-            realtimeTableName, segmentName, e);
-        Utils.rethrowException(e);
-      }
+      _instanceDataManager.offloadSegment(realtimeTableName, segmentName);
+      _recentlyOffloadedConsumingSegments.put(Pair.of(realtimeTableName, segmentName), true);
     }
 
     @Transition(from = "CONSUMING", to = "DROPPED")
-    public void onBecomeDroppedFromConsuming(Message message, NotificationContext context) {
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromConsuming() : " + message);
-      try {
-        onBecomeOfflineFromConsuming(message, context);
-        onBecomeDroppedFromOffline(message, context);
-      } catch (final Exception e) {
-        _logger.error("Caught exception on CONSUMING -> DROPPED state transition", e);
-        Utils.rethrowException(e);
+    public void onBecomeDroppedFromConsuming(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromConsuming() : {}", message);
+      String realtimeTableName = message.getResourceName();
+      String segmentName = message.getPartitionName();
+      _instanceDataManager.offloadSegment(realtimeTableName, segmentName);
+      _instanceDataManager.deleteSegment(realtimeTableName, segmentName);
+      onConsumingToDropped(realtimeTableName, segmentName);
+    }
+
+    /**
+     * Should be invoked after segment is offloaded and deleted so that it can safely release the resources from table
+     * data manager.
+     */
+    private void onConsumingToDropped(String realtimeTableName, String segmentName) {
+      TableDataManager tableDataManager = _instanceDataManager.getTableDataManager(realtimeTableName);
+      if (tableDataManager == null) {
+        _logger.warn(
+            "Failed to find data manager for table: {}, skip invoking consuming to dropped callback for segment: {}",
+            realtimeTableName, segmentName);
+        return;
       }
+      tableDataManager.onConsumingToDropped(segmentName);
     }
 
     @Transition(from = "OFFLINE", to = "ONLINE")
-    public void onBecomeOnlineFromOffline(Message message, NotificationContext context) {
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOnlineFromOffline() : " + message);
-      String tableNameWithType = message.getResourceName();
-      String segmentName = message.getPartitionName();
-      try {
-        TableType tableType = TableNameBuilder.getTableTypeFromTableName(message.getResourceName());
-        Preconditions.checkNotNull(tableType);
-        if (tableType == TableType.OFFLINE) {
-          _instanceDataManager.addOrReplaceSegment(tableNameWithType, segmentName);
-        } else {
-          _instanceDataManager.addRealtimeSegment(tableNameWithType, segmentName);
-        }
-      } catch (Exception e) {
-        String errorMessage = String
-            .format("Caught exception in state transition from OFFLINE -> ONLINE for resource: %s, partition: %s",
-                tableNameWithType, segmentName);
-        _logger.error(errorMessage, e);
-        TableDataManager tableDataManager = _instanceDataManager.getTableDataManager(tableNameWithType);
-        if (tableDataManager != null) {
-          tableDataManager
-              .addSegmentError(segmentName, new SegmentErrorInfo(System.currentTimeMillis(), errorMessage, e));
-        }
-        Utils.rethrowException(e);
-      }
+    public void onBecomeOnlineFromOffline(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOnlineFromOffline() : {}", message);
+      _instanceDataManager.addOnlineSegment(message.getResourceName(), message.getPartitionName());
     }
 
-    // Remove segment from InstanceDataManager.
-    // Still keep the data files in local.
     @Transition(from = "ONLINE", to = "OFFLINE")
-    public void onBecomeOfflineFromOnline(Message message, NotificationContext context) {
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOfflineFromOnline() : " + message);
-      String tableNameWithType = message.getResourceName();
-      String segmentName = message.getPartitionName();
-      try {
-        _instanceDataManager.offloadSegment(tableNameWithType, segmentName);
-      } catch (Exception e) {
-        _logger.error("Caught exception in state transition from ONLINE -> OFFLINE for resource: {}, partition: {}",
-            tableNameWithType, segmentName, e);
-        Utils.rethrowException(e);
-      }
+    public void onBecomeOfflineFromOnline(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOfflineFromOnline() : {}", message);
+      _instanceDataManager.offloadSegment(message.getResourceName(), message.getPartitionName());
     }
 
-    // Delete segment from local directory.
     @Transition(from = "OFFLINE", to = "DROPPED")
-    public void onBecomeDroppedFromOffline(Message message, NotificationContext context) {
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromOffline() : " + message);
+    public void onBecomeDroppedFromOffline(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromOffline() : {}", message);
       String tableNameWithType = message.getResourceName();
       String segmentName = message.getPartitionName();
-      try {
-        _instanceDataManager.deleteSegment(tableNameWithType, segmentName);
-      } catch (final Exception e) {
-        _logger.error("Cannot drop the segment : " + segmentName + " from server!\n" + e.getMessage(), e);
-        Utils.rethrowException(e);
+      _instanceDataManager.deleteSegment(tableNameWithType, segmentName);
+
+      // Check if the segment is recently offloaded from CONSUMING to OFFLINE
+      if (TableNameBuilder.isRealtimeTableResource(tableNameWithType)) {
+        Pair<String, String> tableSegmentPair = Pair.of(tableNameWithType, segmentName);
+        if (_recentlyOffloadedConsumingSegments.getIfPresent(tableSegmentPair) != null) {
+          _recentlyOffloadedConsumingSegments.invalidate(tableSegmentPair);
+          onConsumingToDropped(tableNameWithType, segmentName);
+        }
       }
     }
 
     @Transition(from = "ONLINE", to = "DROPPED")
-    public void onBecomeDroppedFromOnline(Message message, NotificationContext context) {
-      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromOnline() : " + message);
-      try {
-        onBecomeOfflineFromOnline(message, context);
-        onBecomeDroppedFromOffline(message, context);
-      } catch (final Exception e) {
-        _logger.error("Caught exception on ONLINE -> DROPPED state transition", e);
-        Utils.rethrowException(e);
-      }
+    public void onBecomeDroppedFromOnline(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromOnline() : {}", message);
+      String tableNameWithType = message.getResourceName();
+      String segmentName = message.getPartitionName();
+      _instanceDataManager.offloadSegment(tableNameWithType, segmentName);
+      _instanceDataManager.deleteSegment(tableNameWithType, segmentName);
     }
 
     @Transition(from = "ERROR", to = "OFFLINE")
     public void onBecomeOfflineFromError(Message message, NotificationContext context) {
-      _logger.info("Resetting the state for segment:{} from ERROR to OFFLINE", message.getPartitionName());
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeOfflineFromError() : {}", message);
+    }
+
+    @Transition(from = "ERROR", to = "DROPPED")
+    public void onBecomeDroppedFromError(Message message, NotificationContext context)
+        throws Exception {
+      _logger.info("SegmentOnlineOfflineStateModel.onBecomeDroppedFromError() : {}", message);
+      _instanceDataManager.deleteSegment(message.getResourceName(), message.getPartitionName());
     }
   }
 }

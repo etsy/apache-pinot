@@ -21,6 +21,7 @@ package org.apache.pinot.segment.local.upsert;
 import java.io.Closeable;
 import java.util.List;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.MutableSegment;
@@ -65,9 +66,25 @@ public interface PartitionUpsertMetadataManager extends Closeable {
   void addSegment(ImmutableSegment segment);
 
   /**
+   * Preload segments for the table partition. Segments can be added differently during preloading.
+   * TODO: Revisit this and see if we can use the same IndexLoadingConfig for all segments. Tier info might be different
+   *       for different segments.
+   */
+  void preloadSegments(IndexLoadingConfig indexLoadingConfig);
+
+  boolean isPreloading();
+
+  /**
+   * Different from adding a segment, when preloading a segment, the upsert metadata may be updated more efficiently.
+   * Basically the upsert metadata can be directly updated for each primary key, without doing the more costly
+   * read-compare-update.
+   */
+  void preloadSegment(ImmutableSegment segment);
+
+  /**
    * Updates the upsert metadata for a new consumed record in the given consuming segment.
    */
-  void addRecord(MutableSegment segment, RecordInfo recordInfo);
+  boolean addRecord(MutableSegment segment, RecordInfo recordInfo);
 
   /**
    * Replaces the upsert metadata for the old segment with the new immutable segment.
@@ -83,4 +100,20 @@ public interface PartitionUpsertMetadataManager extends Closeable {
    * Returns the merged record when partial-upsert is enabled.
    */
   GenericRow updateRecord(GenericRow record, RecordInfo recordInfo);
+
+  /**
+   * Takes snapshot for all the tracked immutable segments when snapshot is enabled. This method should be invoked
+   * before a new consuming segment starts consuming.
+   */
+  void takeSnapshot();
+
+  /**
+   * Remove the expired primary keys from the metadata when TTL is enabled.
+   */
+  void removeExpiredPrimaryKeys();
+
+  /**
+   * Stops the metadata manager. After invoking this method, no access to the metadata will be accepted.
+   */
+  void stop();
 }

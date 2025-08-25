@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.helix.ControllerTest;
+import org.apache.pinot.controller.util.TableSizeReader;
 import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableTaskConfig;
@@ -95,6 +96,7 @@ public class PinotTaskManagerStatelessTest extends ControllerTest {
     TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTaskConfig(
         new TableTaskConfig(
             ImmutableMap.of("SegmentGenerationAndPushTask", ImmutableMap.of("schedule", "0 * * ? * * *")))).build();
+    waitForEVToDisappear(tableConfig.getTableName());
     addTableConfig(tableConfig);
     waitForJobGroupNames(_controllerStarter.getTaskManager(),
         jgn -> jgn.size() == 1 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE),
@@ -128,6 +130,7 @@ public class PinotTaskManagerStatelessTest extends ControllerTest {
     TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTaskConfig(
         new TableTaskConfig(
             ImmutableMap.of("SegmentGenerationAndPushTask", ImmutableMap.of("schedule", "0 */10 * ? * * *")))).build();
+    waitForEVToDisappear(tableConfig.getTableName());
     addTableConfig(tableConfig);
     waitForJobGroupNames(_controllerStarter.getTaskManager(),
         jgn -> jgn.size() == 1 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE),
@@ -149,8 +152,8 @@ public class PinotTaskManagerStatelessTest extends ControllerTest {
             "MergeRollupTask", ImmutableMap.of("schedule", "0 */10 * ? * * *"))));
     updateTableConfig(tableConfig);
     waitForJobGroupNames(_controllerStarter.getTaskManager(),
-        jgn -> jgn.size() == 2 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE) && jgn
-            .contains(MinionConstants.MergeRollupTask.TASK_TYPE),
+        jgn -> jgn.size() == 2 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE) && jgn.contains(
+            MinionConstants.MergeRollupTask.TASK_TYPE),
         "JobGroupNames should have SegmentGenerationAndPushTask and MergeRollupTask");
     validateJob(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE, "0 */30 * ? * * *");
     validateJob(MinionConstants.MergeRollupTask.TASK_TYPE, "0 */10 * ? * * *");
@@ -193,20 +196,19 @@ public class PinotTaskManagerStatelessTest extends ControllerTest {
     TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTaskConfig(
         new TableTaskConfig(
             ImmutableMap.of("SegmentGenerationAndPushTask", ImmutableMap.of("schedule", "0 */10 * ? * * *")))).build();
+    waitForEVToDisappear(tableConfig.getTableName());
     addTableConfig(tableConfig);
     waitForJobGroupNames(_controllerStarter.getTaskManager(),
         jgn -> jgn.size() == 1 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE),
         "JobGroupNames should have SegmentGenerationAndPushTask only");
     validateJob(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE, "0 */10 * ? * * *");
 
-    // Restart controller
-    stopController();
-    startController(properties);
-    // wait for controller to start correctly.
+    // Restart controller.
+    restartController();
     TestUtils.waitForCondition((aVoid) -> {
       try {
         long tableSize = getTableSize(OFFLINE_TABLE_NAME);
-        return tableSize >= 0;
+        return tableSize == TableSizeReader.DEFAULT_SIZE_WHEN_MISSING_OR_ERROR;
       } catch (Exception e) {
         return false;
       }
@@ -228,8 +230,8 @@ public class PinotTaskManagerStatelessTest extends ControllerTest {
     // The new MergeRollup task wouldn't be scheduled if not eagerly checking table configs
     // after setting up subscriber on ChildChanges zk event when controller gets restarted.
     waitForJobGroupNames(_controllerStarter.getTaskManager(),
-        jgn -> jgn.size() == 2 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE) && jgn
-            .contains(MinionConstants.MergeRollupTask.TASK_TYPE),
+        jgn -> jgn.size() == 2 && jgn.contains(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE) && jgn.contains(
+            MinionConstants.MergeRollupTask.TASK_TYPE),
         "JobGroupNames should have SegmentGenerationAndPushTask and MergeRollupTask");
 
     dropOfflineTable(RAW_TABLE_NAME);

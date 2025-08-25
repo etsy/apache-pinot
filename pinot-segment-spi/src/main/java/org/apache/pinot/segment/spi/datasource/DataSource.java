@@ -19,6 +19,8 @@
 package org.apache.pinot.segment.spi.datasource;
 
 import javax.annotation.Nullable;
+import org.apache.pinot.segment.spi.index.IndexReader;
+import org.apache.pinot.segment.spi.index.IndexType;
 import org.apache.pinot.segment.spi.index.reader.BloomFilterReader;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.index.reader.ForwardIndexReader;
@@ -28,6 +30,7 @@ import org.apache.pinot.segment.spi.index.reader.JsonIndexReader;
 import org.apache.pinot.segment.spi.index.reader.NullValueVectorReader;
 import org.apache.pinot.segment.spi.index.reader.RangeIndexReader;
 import org.apache.pinot.segment.spi.index.reader.TextIndexReader;
+import org.apache.pinot.segment.spi.index.reader.VectorIndexReader;
 
 
 /**
@@ -40,10 +43,19 @@ public interface DataSource {
    */
   DataSourceMetadata getDataSourceMetadata();
 
+  <R extends IndexReader> R getIndex(IndexType<?, R, ?> type);
+
   /**
    * Returns the forward index for the column. The forward index can be either dictionary-encoded or raw.
    */
   ForwardIndexReader<?> getForwardIndex();
+
+  /**
+   * Returns the column name to which this data source pertains
+   */
+  default String getColumnName() {
+    return getDataSourceMetadata().getFieldSpec().getName();
+  }
 
   /**
    * Returns the dictionary for the column if it is dictionary-encoded, or {@code null} if not.
@@ -99,4 +111,10 @@ public interface DataSource {
    */
   @Nullable
   NullValueVectorReader getNullValueVector();
+
+  /**
+   * Returns the vector index for the column if exists, or {@code null} if not.
+   */
+  @Nullable
+  VectorIndexReader getVectorIndex();
 }

@@ -55,6 +55,9 @@ public class SegmentMetadataFetcher {
   private static final String NULL_VALUE_VECTOR_READER = "null-value-vector-reader";
   private static final String RANGE_INDEX = "range-index";
   private static final String JSON_INDEX = "json-index";
+  private static final String H3_INDEX = "h3-index";
+  private static final String FST_INDEX = "fst-index";
+  private static final String TEXT_INDEX = "text-index";
 
   private static final String INDEX_NOT_AVAILABLE = "NO";
   private static final String INDEX_AVAILABLE = "YES";
@@ -80,10 +83,10 @@ public class SegmentMetadataFetcher {
       columnSet = new HashSet<>(columns);
     }
     ObjectNode segmentMetadataJson = (ObjectNode) segmentMetadata.toJson(columnSet);
-    segmentMetadataJson
-        .set(COLUMN_INDEX_KEY, JsonUtils.objectToJsonNode(getIndexesForSegmentColumns(segmentDataManager, columnSet)));
-    segmentMetadataJson
-        .set(STAR_TREE_INDEX_KEY, JsonUtils.objectToJsonNode((getStarTreeIndexesForSegment(segmentDataManager))));
+    segmentMetadataJson.set(COLUMN_INDEX_KEY,
+        JsonUtils.objectToJsonNode(getIndexesForSegmentColumns(segmentDataManager, columnSet)));
+    segmentMetadataJson.set(STAR_TREE_INDEX_KEY,
+        JsonUtils.objectToJsonNode((getStarTreeIndexesForSegment(segmentDataManager))));
     return JsonUtils.objectToString(segmentMetadataJson);
   }
 
@@ -152,6 +155,24 @@ public class SegmentMetadataFetcher {
       indexStatus.put(JSON_INDEX, INDEX_AVAILABLE);
     }
 
+    if (Objects.isNull(dataSource.getH3Index())) {
+      indexStatus.put(H3_INDEX, INDEX_NOT_AVAILABLE);
+    } else {
+      indexStatus.put(H3_INDEX, INDEX_AVAILABLE);
+    }
+
+    if (Objects.isNull(dataSource.getFSTIndex())) {
+      indexStatus.put(FST_INDEX, INDEX_NOT_AVAILABLE);
+    } else {
+      indexStatus.put(FST_INDEX, INDEX_AVAILABLE);
+    }
+
+    if (Objects.isNull(dataSource.getTextIndex())) {
+      indexStatus.put(TEXT_INDEX, INDEX_NOT_AVAILABLE);
+    } else {
+      indexStatus.put(TEXT_INDEX, INDEX_AVAILABLE);
+    }
+
     return indexStatus;
   }
 
@@ -178,15 +199,13 @@ public class SegmentMetadataFetcher {
       starTreeIndexMap.put(STAR_TREE_DIMENSION_COLUMNS, starTreeDimensions);
 
       List<String> starTreeMetricAggregations = new ArrayList<>();
-      Set<AggregationFunctionColumnPair> functionColumnPairs = starTreeMetadata.getFunctionColumnPairs();
-      for (AggregationFunctionColumnPair functionColumnPair : functionColumnPairs) {
+      for (AggregationFunctionColumnPair functionColumnPair : starTreeMetadata.getFunctionColumnPairs()) {
         starTreeMetricAggregations.add(functionColumnPair.toColumnName());
       }
       starTreeIndexMap.put(STAR_TREE_METRIC_AGGREGATIONS, starTreeMetricAggregations);
-
       starTreeIndexMap.put(STAR_TREE_MAX_LEAF_RECORDS, starTreeMetadata.getMaxLeafRecords());
-      starTreeIndexMap
-          .put(STAR_TREE_DIMENSION_COLUMNS_SKIPPED, starTreeMetadata.getSkipStarNodeCreationForDimensions());
+      starTreeIndexMap.put(STAR_TREE_DIMENSION_COLUMNS_SKIPPED,
+          starTreeMetadata.getSkipStarNodeCreationForDimensions());
       startreeDetails.add(starTreeIndexMap);
     }
     return startreeDetails;

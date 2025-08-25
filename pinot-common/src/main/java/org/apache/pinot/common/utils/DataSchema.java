@@ -22,8 +22,11 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
-import com.google.common.collect.Ordering;
 import it.unimi.dsi.fastutil.doubles.DoubleArrayList;
+import it.unimi.dsi.fastutil.floats.FloatArrayList;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -37,6 +40,7 @@ import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.spi.utils.BytesUtils;
+import org.apache.pinot.spi.utils.CommonConstants.NullValuePlaceHolder;
 import org.apache.pinot.spi.utils.EqualityUtils;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -51,7 +55,9 @@ public class DataSchema {
   private final ColumnDataType[] _columnDataTypes;
   private ColumnDataType[] _storedColumnDataTypes;
 
-  /** Used by both Broker and Server to generate results for EXPLAIN PLAN queries. */
+  /**
+   * Used by both Broker and Server to generate results for EXPLAIN PLAN queries.
+   */
   public static final DataSchema EXPLAIN_RESULT_SCHEMA =
       new DataSchema(new String[]{"Operator", "Operator_Id", "Parent_Id"}, new ColumnDataType[]{
           ColumnDataType.STRING, ColumnDataType.INT, ColumnDataType.INT
@@ -99,67 +105,6 @@ public class DataSchema {
       _storedColumnDataTypes = storedColumnDataTypes;
     }
     return storedColumnDataTypes;
-  }
-
-  /**
-   * Returns whether the given data schema is type compatible with this one.
-   * <ul>
-   *   <li>All numbers are type compatible with each other</li>
-   *   <li>Numbers are not type compatible with string</li>
-   *   <li>Non-array types are not type compatible with array types</li>
-   * </ul>
-   *
-   * @param anotherDataSchema Data schema to compare with
-   * @return Whether the two data schemas are type compatible
-   */
-  public boolean isTypeCompatibleWith(DataSchema anotherDataSchema) {
-    if (!Arrays.equals(_columnNames, anotherDataSchema._columnNames)) {
-      return false;
-    }
-    int numColumns = _columnNames.length;
-    for (int i = 0; i < numColumns; i++) {
-      if (!_columnDataTypes[i].isCompatible(anotherDataSchema._columnDataTypes[i])) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Upgrade the current data schema to cover the column data types in the given data schema.
-   * <p>Data type <code>LONG</code> can cover <code>INT</code> and <code>LONG</code>.
-   * <p>Data type <code>DOUBLE</code> can cover all numbers, but with potential precision loss when use it to cover
-   * <code>LONG</code>.
-   * <p>NOTE: The given data schema should be type compatible with this one.
-   *
-   * @param originalSchema the original Data schema
-   * @param anotherDataSchema Data schema to cover
-   */
-  public static DataSchema upgradeToCover(DataSchema originalSchema, DataSchema anotherDataSchema) {
-    int numColumns = originalSchema._columnDataTypes.length;
-    ColumnDataType[] columnDataTypes = new ColumnDataType[numColumns];
-    for (int i = 0; i < numColumns; i++) {
-      ColumnDataType thisColumnDataType = originalSchema._columnDataTypes[i];
-      ColumnDataType thatColumnDataType = anotherDataSchema._columnDataTypes[i];
-      if (thisColumnDataType != thatColumnDataType) {
-        if (thisColumnDataType.isArray()) {
-          if (thisColumnDataType.isWholeNumberArray() && thatColumnDataType.isWholeNumberArray()) {
-            columnDataTypes[i] = ColumnDataType.LONG_ARRAY;
-          } else {
-            columnDataTypes[i] = ColumnDataType.DOUBLE_ARRAY;
-          }
-        } else {
-          if (thisColumnDataType.isWholeNumber() && thatColumnDataType.isWholeNumber()) {
-            columnDataTypes[i] = ColumnDataType.LONG;
-          } else {
-            columnDataTypes[i] = ColumnDataType.DOUBLE;
-          }
-        }
-      } else {
-        columnDataTypes[i] = originalSchema._columnDataTypes[i];
-      }
-    }
-    return new DataSchema(originalSchema._columnNames, columnDataTypes);
   }
 
   public byte[] toBytes()
@@ -252,28 +197,28 @@ public class DataSchema {
   }
 
   public enum ColumnDataType {
-    INT(0),
-    LONG(0L),
-    FLOAT(0f),
-    DOUBLE(0d),
-    BIG_DECIMAL(BigDecimal.ZERO),
-    BOOLEAN(INT, 0),
-    TIMESTAMP(LONG, 0L),
-    STRING(""),
-    JSON(STRING, ""),
-    BYTES(new ByteArray(new byte[0])),
+    INT(NullValuePlaceHolder.INT),
+    LONG(NullValuePlaceHolder.LONG),
+    FLOAT(NullValuePlaceHolder.FLOAT),
+    DOUBLE(NullValuePlaceHolder.DOUBLE),
+    BIG_DECIMAL(NullValuePlaceHolder.BIG_DECIMAL),
+    BOOLEAN(INT, NullValuePlaceHolder.INT),
+    TIMESTAMP(LONG, NullValuePlaceHolder.LONG),
+    STRING(NullValuePlaceHolder.STRING),
+    JSON(STRING, NullValuePlaceHolder.STRING),
+    BYTES(NullValuePlaceHolder.INTERNAL_BYTES),
     OBJECT(null),
-    INT_ARRAY(new int[0]),
-    LONG_ARRAY(new long[0]),
-    FLOAT_ARRAY(new float[0]),
-    DOUBLE_ARRAY(new double[0]),
-    BOOLEAN_ARRAY(INT_ARRAY, new int[0]),
-    TIMESTAMP_ARRAY(LONG_ARRAY, new long[0]),
-    STRING_ARRAY(new String[0]),
-    BYTES_ARRAY(new byte[0][]);
+    INT_ARRAY(NullValuePlaceHolder.INT_ARRAY),
+    LONG_ARRAY(NullValuePlaceHolder.LONG_ARRAY),
+    FLOAT_ARRAY(NullValuePlaceHolder.FLOAT_ARRAY),
+    DOUBLE_ARRAY(NullValuePlaceHolder.DOUBLE_ARRAY),
+    BOOLEAN_ARRAY(INT_ARRAY, NullValuePlaceHolder.INT_ARRAY),
+    TIMESTAMP_ARRAY(LONG_ARRAY, NullValuePlaceHolder.LONG_ARRAY),
+    STRING_ARRAY(NullValuePlaceHolder.STRING_ARRAY),
+    BYTES_ARRAY(NullValuePlaceHolder.BYTES_ARRAY),
+    UNKNOWN(null);
 
     private static final EnumSet<ColumnDataType> NUMERIC_TYPES = EnumSet.of(INT, LONG, FLOAT, DOUBLE, BIG_DECIMAL);
-    private static final Ordering<ColumnDataType> NUMERIC_TYPE_ORDERING = Ordering.explicit(INT, LONG, FLOAT, DOUBLE);
     private static final EnumSet<ColumnDataType> INTEGRAL_TYPES = EnumSet.of(INT, LONG);
     private static final EnumSet<ColumnDataType> ARRAY_TYPES =
         EnumSet.of(INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY, DOUBLE_ARRAY, STRING_ARRAY, BOOLEAN_ARRAY, TIMESTAMP_ARRAY,
@@ -335,51 +280,133 @@ public class DataSchema {
           this.isNumberArray() && anotherColumnDataType.isNumberArray());
     }
 
-    /**
-     * Determine if the candidate {@link ColumnDataType} is convertable to this type via the conversion API.
-     *
-     * @param subTypeCandidate candidate column data type to validate.
-     * @return true if it is a sub-type.
-     * @see DataSchema.ColumnDataType#convert(Object)
-     */
-    public boolean isSuperTypeOf(ColumnDataType subTypeCandidate) {
-      if (this.isNumber() && subTypeCandidate.isNumber() && this != BIG_DECIMAL && subTypeCandidate != BIG_DECIMAL) {
-        return NUMERIC_TYPE_ORDERING.max(this, subTypeCandidate) == this;
-      } else {
-        return this == subTypeCandidate;
-      }
-    }
-
     public DataType toDataType() {
       switch (this) {
         case INT:
+        case INT_ARRAY:
           return DataType.INT;
         case LONG:
+        case LONG_ARRAY:
           return DataType.LONG;
         case FLOAT:
+        case FLOAT_ARRAY:
           return DataType.FLOAT;
         case DOUBLE:
+        case DOUBLE_ARRAY:
           return DataType.DOUBLE;
         case BIG_DECIMAL:
           return DataType.BIG_DECIMAL;
         case BOOLEAN:
+        case BOOLEAN_ARRAY:
           return DataType.BOOLEAN;
         case TIMESTAMP:
+        case TIMESTAMP_ARRAY:
           return DataType.TIMESTAMP;
         case STRING:
+        case STRING_ARRAY:
           return DataType.STRING;
         case JSON:
           return DataType.JSON;
         case BYTES:
+        case BYTES_ARRAY:
           return DataType.BYTES;
+        case UNKNOWN:
+          return DataType.UNKNOWN;
         default:
           throw new IllegalStateException(String.format("Cannot convert ColumnDataType: %s to DataType", this));
       }
     }
 
     /**
+     * Converts the value from external value type to the internal value type.
+     *
+     * <p>External value type is used in the following places:
+     * <ul>
+     *   <li>Data ingestion</li>
+     *   <li>Scalar function arguments (UDF)</li>
+     *   <li>Query response</li>
+     * </ul>
+     *
+     * <p>Internal value type is used within the storage and query engine, where value is always of the stored type. For
+     * BYTES type, we use a wrapper class {@link ByteArray} to make it comparable.
+     *
+     * <p>The conversion applies to the following types:
+     * <ul>
+     *   <li>BOOLEAN: boolean -> int</li>
+     *   <li>TIMESTAMP: Timestamp -> long</li>
+     *   <li>BYTES: byte[] -> ByteArray</li>
+     *   <li>BOOLEAN_ARRAY: boolean[] -> int[]</li>
+     *   <li>TIMESTAMP_ARRAY: Timestamp[] -> long[]</li>
+     * </ul>
+     */
+    public Object toInternal(Object value) {
+      switch (this) {
+        case BOOLEAN:
+          return ((boolean) value) ? 1 : 0;
+        case TIMESTAMP:
+          return ((Timestamp) value).getTime();
+        case BYTES:
+          return new ByteArray((byte[]) value);
+        case BOOLEAN_ARRAY:
+          return fromBooleanArray((boolean[]) value);
+        case TIMESTAMP_ARRAY:
+          return fromTimestampArray((Timestamp[]) value);
+        case OBJECT:
+          // For OBJECT type, we need to convert based on the actual type of the value. This can happen when the scalar
+          // function returns Object type, e.g. cast function.
+          if (value instanceof Boolean) {
+            return ((boolean) value) ? 1 : 0;
+          }
+          if (value instanceof Timestamp) {
+            return ((Timestamp) value).getTime();
+          }
+          if (value instanceof byte[]) {
+            return new ByteArray((byte[]) value);
+          }
+          if (value instanceof boolean[]) {
+            return fromBooleanArray((boolean[]) value);
+          }
+          if (value instanceof Timestamp[]) {
+            return fromTimestampArray((Timestamp[]) value);
+          }
+          return value;
+        default:
+          return value;
+      }
+    }
+
+    /**
+     * Converts the value from internal value type to the external value type.
+     *
+     * <p>The conversion applies to the following types:
+     * <ul>
+     *   <li>BOOLEAN: int -> boolean</li>
+     *   <li>TIMESTAMP: long -> Timestamp</li>
+     *   <li>BYTES: ByteArray -> byte[]</li>
+     *   <li>BOOLEAN_ARRAY: int[] -> boolean[]</li>
+     *   <li>TIMESTAMP_ARRAY: long[] -> Timestamp[]</li>
+     * </ul>
+     */
+    public Object toExternal(Object value) {
+      switch (this) {
+        case BOOLEAN:
+          return ((int) value) == 1;
+        case TIMESTAMP:
+          return new Timestamp((long) value);
+        case BYTES:
+          return ((ByteArray) value).getBytes();
+        case BOOLEAN_ARRAY:
+          return toBooleanArray((int[]) value);
+        case TIMESTAMP_ARRAY:
+          return toTimestampArray((long[]) value);
+        default:
+          return value;
+      }
+    }
+
+    /**
      * Converts the given internal value to the type for external use (e.g. as UDF argument). The given value should be
-     * compatible with the type.
+     * compatible with the type. This method should be used on the reducer side of the single-stage engine.
      */
     public Serializable convert(Object value) {
       switch (this) {
@@ -394,7 +421,7 @@ public class DataSchema {
         case BIG_DECIMAL:
           return (BigDecimal) value;
         case BOOLEAN:
-          return (Integer) value == 1;
+          return ((int) value) == 1;
         case TIMESTAMP:
           return new Timestamp((long) value);
         case STRING:
@@ -403,28 +430,32 @@ public class DataSchema {
         case BYTES:
           return ((ByteArray) value).getBytes();
         case INT_ARRAY:
-          return (int[]) value;
+          return toIntArray(value);
         case LONG_ARRAY:
           return toLongArray(value);
         case FLOAT_ARRAY:
-          return (float[]) value;
+          return toFloatArray(value);
         case DOUBLE_ARRAY:
           return toDoubleArray(value);
         case STRING_ARRAY:
-          return (String[]) value;
+          return toStringArray(value);
         case BOOLEAN_ARRAY:
-          return toBooleanArray(value);
+          return toBooleanArray(toIntArray(value));
         case TIMESTAMP_ARRAY:
-          return toTimestampArray(value);
+          return toTimestampArray(toLongArray(value));
         case BYTES_ARRAY:
           return (byte[][]) value;
+        case UNKNOWN: // fall through
+        case OBJECT:
+          return (Serializable) value;
         default:
           throw new IllegalStateException(String.format("Cannot convert: '%s' to type: %s", value, this));
       }
     }
 
     /**
-     * Formats the value to human-readable format based on the type to be used in the query response.
+     * Formats the value based on the type to be used in the JSON query response. For BIG_DECIMAL, even though JSON can
+     * serialize BigDecimal, it is best practice to convert it to String to avoid precision loss during deserialization.
      */
     public Serializable format(Object value) {
       switch (this) {
@@ -435,6 +466,8 @@ public class DataSchema {
           return value.toString();
         case BYTES:
           return BytesUtils.toHexString((byte[]) value);
+        case TIMESTAMP_ARRAY:
+          return formatTimestampArray((Timestamp[]) value);
         default:
           return (Serializable) value;
       }
@@ -454,9 +487,9 @@ public class DataSchema {
         case DOUBLE:
           return ((Number) value).doubleValue();
         case BIG_DECIMAL:
-          return (BigDecimal) value;
+          return ((BigDecimal) value).toPlainString();
         case BOOLEAN:
-          return (Integer) value == 1;
+          return ((int) value) == 1;
         case TIMESTAMP:
           return new Timestamp((long) value).toString();
         case STRING:
@@ -475,9 +508,9 @@ public class DataSchema {
         case STRING_ARRAY:
           return (String[]) value;
         case BOOLEAN_ARRAY:
-          return toBooleanArray(value);
+          return toBooleanArray((int[]) value);
         case TIMESTAMP_ARRAY:
-          return formatTimestampArray(value);
+          return formatTimestampArray((long[]) value);
         case BYTES_ARRAY:
           return (byte[][]) value;
         default:
@@ -485,11 +518,32 @@ public class DataSchema {
       }
     }
 
+    private static int[] toIntArray(Object value) {
+      if (value instanceof int[]) {
+        return (int[]) value;
+      } else if (value instanceof IntArrayList) {
+        // For ArrayAggregationFunction
+        return ArrayListUtils.toIntArray((IntArrayList) value);
+      }
+      throw new IllegalStateException(String.format("Cannot convert: '%s' to int[]", value));
+    }
+
+    private static float[] toFloatArray(Object value) {
+      if (value instanceof float[]) {
+        return (float[]) value;
+      } else if (value instanceof FloatArrayList) {
+        // For ArrayAggregationFunction
+        return ArrayListUtils.toFloatArray((FloatArrayList) value);
+      }
+      throw new IllegalStateException(String.format("Cannot convert: '%s' to float[]", value));
+    }
+
     private static double[] toDoubleArray(Object value) {
       if (value instanceof double[]) {
         return (double[]) value;
       } else if (value instanceof DoubleArrayList) {
-        return ((DoubleArrayList) value).elements();
+        // For HistogramAggregationFunction and ArrayAggregationFunction
+        return ArrayListUtils.toDoubleArray((DoubleArrayList) value);
       } else if (value instanceof int[]) {
         int[] intValues = (int[]) value;
         int length = intValues.length;
@@ -520,6 +574,9 @@ public class DataSchema {
     private static long[] toLongArray(Object value) {
       if (value instanceof long[]) {
         return (long[]) value;
+      } else if (value instanceof LongArrayList) {
+        // For FunnelCountAggregationFunction and ArrayAggregationFunction
+        return ArrayListUtils.toLongArray((LongArrayList) value);
       } else {
         int[] intValues = (int[]) value;
         int length = intValues.length;
@@ -531,27 +588,68 @@ public class DataSchema {
       }
     }
 
-    private static boolean[] toBooleanArray(Object value) {
-      int[] ints = (int[]) value;
-      boolean[] booleans = new boolean[ints.length];
-      for (int i = 0; i < ints.length; i++) {
-        booleans[i] = ints[i] == 1;
+    private static String[] toStringArray(Object value) {
+      if (value instanceof String[]) {
+        return (String[]) value;
+      } else if (value instanceof ObjectArrayList) {
+        // For ArrayAggregationFunction
+        return ArrayListUtils.toStringArray((ObjectArrayList<String>) value);
       }
-      return booleans;
+      throw new IllegalStateException(String.format("Cannot convert: '%s' to String[]", value));
     }
 
-    private static Timestamp[] toTimestampArray(Object value) {
-      long[] longs = (long[]) value;
-      Timestamp[] timestamps = new Timestamp[longs.length];
-      Arrays.setAll(timestamps, i -> new Timestamp(longs[i]));
-      return timestamps;
+    private static boolean[] toBooleanArray(int[] intArray) {
+      int length = intArray.length;
+      boolean[] booleanArray = new boolean[length];
+      for (int i = 0; i < length; i++) {
+        booleanArray[i] = intArray[i] == 1;
+      }
+      return booleanArray;
     }
 
-    private static String[] formatTimestampArray(Object value) {
-      long[] longs = (long[]) value;
-      String[] formatted = new String[longs.length];
-      Arrays.setAll(formatted, i -> new Timestamp(longs[i]).toString());
-      return formatted;
+    private static int[] fromBooleanArray(boolean[] booleanArray) {
+      int length = booleanArray.length;
+      int[] intArray = new int[length];
+      for (int i = 0; i < length; i++) {
+        intArray[i] = booleanArray[i] ? 1 : 0;
+      }
+      return intArray;
+    }
+
+    private static Timestamp[] toTimestampArray(long[] longArray) {
+      int length = longArray.length;
+      Timestamp[] timestampArray = new Timestamp[length];
+      for (int i = 0; i < length; i++) {
+        timestampArray[i] = new Timestamp(longArray[i]);
+      }
+      return timestampArray;
+    }
+
+    private static long[] fromTimestampArray(Timestamp[] timestampArray) {
+      int length = timestampArray.length;
+      long[] longArray = new long[length];
+      for (int i = 0; i < length; i++) {
+        longArray[i] = timestampArray[i].getTime();
+      }
+      return longArray;
+    }
+
+    private static String[] formatTimestampArray(long[] longArray) {
+      int length = longArray.length;
+      String[] formattedTimestampArray = new String[length];
+      for (int i = 0; i < length; i++) {
+        formattedTimestampArray[i] = new Timestamp(longArray[i]).toString();
+      }
+      return formattedTimestampArray;
+    }
+
+    private static String[] formatTimestampArray(Timestamp[] timestampArray) {
+      int length = timestampArray.length;
+      String[] formattedTimestampArray = new String[length];
+      for (int i = 0; i < length; i++) {
+        formattedTimestampArray[i] = timestampArray[i].toString();
+      }
+      return formattedTimestampArray;
     }
 
     public static ColumnDataType fromDataType(DataType dataType, boolean isSingleValue) {
@@ -580,6 +678,8 @@ public class DataSchema {
           return JSON;
         case BYTES:
           return BYTES;
+        case UNKNOWN:
+          return UNKNOWN;
         default:
           throw new IllegalStateException("Unsupported data type: " + dataType);
       }

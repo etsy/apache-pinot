@@ -67,6 +67,7 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(selectExpressions.size(), 1);
       assertEquals(selectExpressions.get(0), ExpressionContext.forIdentifier("*"));
       assertEquals(selectExpressions.get(0).toString(), "*");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       assertNull(queryContext.getGroupByExpressions());
@@ -91,6 +92,7 @@ public class BrokerRequestToQueryContextConverterTest {
           new FunctionContext(FunctionContext.Type.AGGREGATION, "count",
               Collections.singletonList(ExpressionContext.forIdentifier("*")))));
       assertEquals(selectExpressions.get(0).toString(), "count(*)");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       assertNull(queryContext.getGroupByExpressions());
@@ -115,6 +117,7 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(selectExpressions.get(0).toString(), "foo");
       assertEquals(selectExpressions.get(1), ExpressionContext.forIdentifier("bar"));
       assertEquals(selectExpressions.get(1).toString(), "bar");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       List<OrderByExpressionContext> orderByExpressions = queryContext.getOrderByExpressions();
@@ -139,12 +142,14 @@ public class BrokerRequestToQueryContextConverterTest {
       QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
       assertEquals(queryContext.getTableName(), "testTable");
       List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
-      assertEquals(selectExpressions.size(), 1);
-      assertEquals(selectExpressions.get(0), ExpressionContext.forFunction(
-          new FunctionContext(FunctionContext.Type.AGGREGATION, "distinct",
-              Arrays.asList(ExpressionContext.forIdentifier("foo"), ExpressionContext.forIdentifier("bar"),
-                  ExpressionContext.forIdentifier("foobar")))));
-      assertEquals(selectExpressions.get(0).toString(), "distinct(foo,bar,foobar)");
+      assertEquals(selectExpressions.size(), 3);
+      assertEquals(selectExpressions.get(0), ExpressionContext.forIdentifier("foo"));
+      assertEquals(selectExpressions.get(0).toString(), "foo");
+      assertEquals(selectExpressions.get(1), ExpressionContext.forIdentifier("bar"));
+      assertEquals(selectExpressions.get(1).toString(), "bar");
+      assertEquals(selectExpressions.get(2), ExpressionContext.forIdentifier("foobar"));
+      assertEquals(selectExpressions.get(2).toString(), "foobar");
+      assertTrue(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       assertNull(queryContext.getGroupByExpressions());
@@ -179,13 +184,14 @@ public class BrokerRequestToQueryContextConverterTest {
               Arrays.asList(ExpressionContext.forIdentifier("foo"), ExpressionContext.forFunction(
                   new FunctionContext(FunctionContext.Type.TRANSFORM, "add",
                       Arrays.asList(ExpressionContext.forIdentifier("bar"),
-                          ExpressionContext.forLiteralContext(FieldSpec.DataType.LONG, Long.valueOf(123)))))))));
+                          ExpressionContext.forLiteral(FieldSpec.DataType.INT, Integer.valueOf(123)))))))));
       assertEquals(selectExpressions.get(0).toString(), "add(foo,add(bar,'123'))");
       assertEquals(selectExpressions.get(1), ExpressionContext.forFunction(
           new FunctionContext(FunctionContext.Type.TRANSFORM, "sub",
-              Arrays.asList(ExpressionContext.forLiteralContext(FieldSpec.DataType.STRING, "456"),
+              Arrays.asList(ExpressionContext.forLiteral(FieldSpec.DataType.STRING, "456"),
                   ExpressionContext.forIdentifier("foobar")))));
       assertEquals(selectExpressions.get(1).toString(), "sub('456',foobar)");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       assertNull(queryContext.getGroupByExpressions());
@@ -194,7 +200,7 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(orderByExpressions.size(), 1);
       assertEquals(orderByExpressions.get(0), new OrderByExpressionContext(ExpressionContext.forFunction(
           new FunctionContext(FunctionContext.Type.TRANSFORM, "sub",
-              Arrays.asList(ExpressionContext.forLiteralContext(FieldSpec.DataType.LONG, Long.valueOf(456)),
+              Arrays.asList(ExpressionContext.forLiteral(FieldSpec.DataType.INT, Integer.valueOf(456)),
                   ExpressionContext.forIdentifier("foobar")))), true));
       assertEquals(orderByExpressions.get(0).toString(), "sub('456',foobar) ASC");
       assertNull(queryContext.getHavingFilter());
@@ -213,7 +219,7 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(queryContext.getTableName(), "testTable");
       List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
       assertEquals(selectExpressions.size(), 1);
-      assertEquals(selectExpressions.get(0), ExpressionContext.forLiteralContext(FieldSpec.DataType.BOOLEAN, true));
+      assertEquals(selectExpressions.get(0), ExpressionContext.forLiteral(FieldSpec.DataType.BOOLEAN, true));
       assertEquals(selectExpressions.get(0).toString(), "'true'");
     }
 
@@ -225,22 +231,19 @@ public class BrokerRequestToQueryContextConverterTest {
       QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
       assertEquals(queryContext.getTableName(), "testTable");
       List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
-      int numSelectExpressions = selectExpressions.size();
-      assertTrue(numSelectExpressions == 1 || numSelectExpressions == 3);
-      ExpressionContext aggregationExpression = selectExpressions.get(numSelectExpressions - 1);
-      assertEquals(aggregationExpression, ExpressionContext.forFunction(
+      assertEquals(selectExpressions.size(), 3);
+      assertEquals(selectExpressions.get(0), ExpressionContext.forFunction(
+          new FunctionContext(FunctionContext.Type.TRANSFORM, "sub",
+              Arrays.asList(ExpressionContext.forIdentifier("foo"), ExpressionContext.forIdentifier("bar")))));
+      assertEquals(selectExpressions.get(0).toString(), "sub(foo,bar)");
+      assertEquals(selectExpressions.get(1), ExpressionContext.forIdentifier("bar"));
+      assertEquals(selectExpressions.get(1).toString(), "bar");
+      assertEquals(selectExpressions.get(2), ExpressionContext.forFunction(
           new FunctionContext(FunctionContext.Type.AGGREGATION, "sum", Collections.singletonList(
               ExpressionContext.forFunction(new FunctionContext(FunctionContext.Type.TRANSFORM, "add",
                   Arrays.asList(ExpressionContext.forIdentifier("foo"), ExpressionContext.forIdentifier("bar"))))))));
-      assertEquals(aggregationExpression.toString(), "sum(add(foo,bar))");
-      if (numSelectExpressions == 3) {
-        assertEquals(selectExpressions.get(0), ExpressionContext.forFunction(
-            new FunctionContext(FunctionContext.Type.TRANSFORM, "sub",
-                Arrays.asList(ExpressionContext.forIdentifier("foo"), ExpressionContext.forIdentifier("bar")))));
-        assertEquals(selectExpressions.get(0).toString(), "sub(foo,bar)");
-        assertEquals(selectExpressions.get(1), ExpressionContext.forIdentifier("bar"));
-        assertEquals(selectExpressions.get(1).toString(), "bar");
-      }
+      assertEquals(selectExpressions.get(2).toString(), "sum(add(foo,bar))");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
@@ -284,23 +287,24 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(selectExpressions.size(), 1);
       assertEquals(selectExpressions.get(0), ExpressionContext.forIdentifier("*"));
       assertEquals(selectExpressions.get(0).toString(), "*");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       FilterContext filter = queryContext.getFilter();
       assertNotNull(filter);
       assertEquals(filter.getType(), FilterContext.Type.AND);
       List<FilterContext> children = filter.getChildren();
       assertEquals(children.size(), 2);
-      assertEquals(children.get(0), new FilterContext(FilterContext.Type.PREDICATE, null,
-          new RangePredicate(ExpressionContext.forIdentifier("foo"), false, "15", false, "*")));
+      assertEquals(children.get(0), FilterContext.forPredicate(
+          new RangePredicate(ExpressionContext.forIdentifier("foo"), false, "15", false, "*", FieldSpec.DataType.INT)));
       FilterContext orFilter = children.get(1);
       assertEquals(orFilter.getType(), FilterContext.Type.OR);
       assertEquals(orFilter.getChildren().size(), 2);
-      assertEquals(orFilter.getChildren().get(0), new FilterContext(FilterContext.Type.PREDICATE, null,
-          new RangePredicate(ExpressionContext.forFunction(new FunctionContext(FunctionContext.Type.TRANSFORM, "div",
+      assertEquals(orFilter.getChildren().get(0), FilterContext.forPredicate(new RangePredicate(
+          ExpressionContext.forFunction(new FunctionContext(FunctionContext.Type.TRANSFORM, "div",
               Arrays.asList(ExpressionContext.forIdentifier("bar"), ExpressionContext.forIdentifier("foo")))), true,
-              "10", true, "20")));
-      assertEquals(orFilter.getChildren().get(1), new FilterContext(FilterContext.Type.PREDICATE, null,
-          new TextMatchPredicate(ExpressionContext.forIdentifier("foobar"), "potato")));
+          "10", true, "20", FieldSpec.DataType.INT)));
+      assertEquals(orFilter.getChildren().get(1),
+          FilterContext.forPredicate(new TextMatchPredicate(ExpressionContext.forIdentifier("foobar"), "potato")));
       assertEquals(filter.toString(),
           "(foo > '15' AND (div(bar,foo) BETWEEN '10' AND '20' OR text_match(foobar,'potato')))");
       assertNull(queryContext.getGroupByExpressions());
@@ -317,7 +321,8 @@ public class BrokerRequestToQueryContextConverterTest {
     // Alias
     // NOTE: All the references to the alias should already be converted to the original expressions.
     {
-      String query = "SELECT SUM(foo) AS a, bar AS b FROM testTable WHERE b IN (5, 10, 15) GROUP BY b ORDER BY a DESC";
+      String query =
+          "SELECT SUM(foo) AS a, bar AS b FROM testTable WHERE bar IN (5, 10, 15) GROUP BY b ORDER BY a DESC";
       QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
       assertEquals(queryContext.getTableName(), "testTable");
       List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
@@ -328,13 +333,14 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(selectExpressions.get(0).toString(), "sum(foo)");
       assertEquals(selectExpressions.get(1), ExpressionContext.forIdentifier("bar"));
       assertEquals(selectExpressions.get(1).toString(), "bar");
+      assertFalse(queryContext.isDistinct());
       List<String> aliasList = queryContext.getAliasList();
       assertEquals(aliasList.size(), 2);
       assertEquals(aliasList.get(0), "a");
       assertEquals(aliasList.get(1), "b");
       FilterContext filter = queryContext.getFilter();
       assertNotNull(filter);
-      assertEquals(filter, new FilterContext(FilterContext.Type.PREDICATE, null,
+      assertEquals(filter, FilterContext.forPredicate(
           new InPredicate(ExpressionContext.forIdentifier("bar"), Arrays.asList("5", "10", "15"))));
       assertEquals(filter.toString(), "bar IN ('5','10','15')");
       List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
@@ -371,6 +377,7 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(selectExpressions.get(0).toString(), "sum(foo)");
       assertEquals(selectExpressions.get(1), ExpressionContext.forIdentifier("bar"));
       assertEquals(selectExpressions.get(1).toString(), "bar");
+      assertFalse(queryContext.isDistinct());
       assertEquals(getAliasCount(queryContext.getAliasList()), 0);
       assertNull(queryContext.getFilter());
       List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
@@ -381,8 +388,8 @@ public class BrokerRequestToQueryContextConverterTest {
       assertNull(queryContext.getOrderByExpressions());
       FilterContext havingFilter = queryContext.getHavingFilter();
       assertNotNull(havingFilter);
-      assertEquals(havingFilter, new FilterContext(FilterContext.Type.PREDICATE, null, new InPredicate(
-          ExpressionContext.forFunction(new FunctionContext(FunctionContext.Type.AGGREGATION, "sum",
+      assertEquals(havingFilter, FilterContext.forPredicate(new InPredicate(ExpressionContext.forFunction(
+          new FunctionContext(FunctionContext.Type.AGGREGATION, "sum",
               Collections.singletonList(ExpressionContext.forIdentifier("foo")))), Arrays.asList("5", "10", "15"))));
       assertEquals(havingFilter.toString(), "sum(foo) IN ('5','10','15')");
       assertEquals(queryContext.getLimit(), 10);
@@ -473,21 +480,21 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(aggregationFunctions[3].getResultColumnName(), "sum(col4)");
       assertEquals(aggregationFunctions[4].getResultColumnName(), "max(col4)");
       assertEquals(aggregationFunctions[5].getResultColumnName(), "max(col1)");
-      Map<FunctionContext, Integer> aggregationFunctionIndexMap = queryContext.getAggregationFunctionIndexMap();
-      assertNotNull(aggregationFunctionIndexMap);
-      assertEquals(aggregationFunctionIndexMap.size(), 6);
-      assertEquals((int) aggregationFunctionIndexMap.get(new FunctionContext(FunctionContext.Type.AGGREGATION, "sum",
-          Collections.singletonList(ExpressionContext.forIdentifier("col1")))), 0);
-      assertEquals((int) aggregationFunctionIndexMap.get(new FunctionContext(FunctionContext.Type.AGGREGATION, "max",
-          Collections.singletonList(ExpressionContext.forIdentifier("col2")))), 1);
-      assertEquals((int) aggregationFunctionIndexMap.get(new FunctionContext(FunctionContext.Type.AGGREGATION, "min",
-          Collections.singletonList(ExpressionContext.forIdentifier("col2")))), 2);
-      assertEquals((int) aggregationFunctionIndexMap.get(new FunctionContext(FunctionContext.Type.AGGREGATION, "sum",
-          Collections.singletonList(ExpressionContext.forIdentifier("col4")))), 3);
-      assertEquals((int) aggregationFunctionIndexMap.get(new FunctionContext(FunctionContext.Type.AGGREGATION, "max",
-          Collections.singletonList(ExpressionContext.forIdentifier("col4")))), 4);
-      assertEquals((int) aggregationFunctionIndexMap.get(new FunctionContext(FunctionContext.Type.AGGREGATION, "max",
-          Collections.singletonList(ExpressionContext.forIdentifier("col1")))), 5);
+      Map<Pair<FunctionContext, FilterContext>, Integer> indexMap = queryContext.getFilteredAggregationsIndexMap();
+      assertNotNull(indexMap);
+      assertEquals(indexMap.size(), 6);
+      assertEquals((int) indexMap.get(Pair.of(new FunctionContext(FunctionContext.Type.AGGREGATION, "sum",
+          Collections.singletonList(ExpressionContext.forIdentifier("col1"))), null)), 0);
+      assertEquals((int) indexMap.get(Pair.of(new FunctionContext(FunctionContext.Type.AGGREGATION, "max",
+          Collections.singletonList(ExpressionContext.forIdentifier("col2"))), null)), 1);
+      assertEquals((int) indexMap.get(Pair.of(new FunctionContext(FunctionContext.Type.AGGREGATION, "min",
+          Collections.singletonList(ExpressionContext.forIdentifier("col2"))), null)), 2);
+      assertEquals((int) indexMap.get(Pair.of(new FunctionContext(FunctionContext.Type.AGGREGATION, "sum",
+          Collections.singletonList(ExpressionContext.forIdentifier("col4"))), null)), 3);
+      assertEquals((int) indexMap.get(Pair.of(new FunctionContext(FunctionContext.Type.AGGREGATION, "max",
+          Collections.singletonList(ExpressionContext.forIdentifier("col4"))), null)), 4);
+      assertEquals((int) indexMap.get(Pair.of(new FunctionContext(FunctionContext.Type.AGGREGATION, "max",
+          Collections.singletonList(ExpressionContext.forIdentifier("col1"))), null)), 5);
     }
 
     // DistinctCountThetaSketch (string literal and escape quote)
@@ -500,12 +507,10 @@ public class BrokerRequestToQueryContextConverterTest {
       assertEquals(function.getFunctionName(), "distinctcountthetasketch");
       List<ExpressionContext> arguments = function.getArguments();
       assertEquals(arguments.get(0), ExpressionContext.forIdentifier("foo"));
-      assertEquals(arguments.get(1),
-          ExpressionContext.forLiteralContext(FieldSpec.DataType.STRING, "nominalEntries=1000"));
-      assertEquals(arguments.get(2), ExpressionContext.forLiteralContext(FieldSpec.DataType.STRING, "bar='a'"));
-      assertEquals(arguments.get(3), ExpressionContext.forLiteralContext(FieldSpec.DataType.STRING, "bar='b'"));
-      assertEquals(arguments.get(4),
-          ExpressionContext.forLiteralContext(FieldSpec.DataType.STRING, "SET_INTERSECT($1, $2)"));
+      assertEquals(arguments.get(1), ExpressionContext.forLiteral(FieldSpec.DataType.STRING, "nominalEntries=1000"));
+      assertEquals(arguments.get(2), ExpressionContext.forLiteral(FieldSpec.DataType.STRING, "bar='a'"));
+      assertEquals(arguments.get(3), ExpressionContext.forLiteral(FieldSpec.DataType.STRING, "bar='b'"));
+      assertEquals(arguments.get(4), ExpressionContext.forLiteral(FieldSpec.DataType.STRING, "SET_INTERSECT($1, $2)"));
       assertEquals(queryContext.getColumns(), new HashSet<>(Arrays.asList("foo", "bar")));
       assertFalse(QueryContextUtils.isSelectionQuery(queryContext));
       assertTrue(QueryContextUtils.isAggregationQuery(queryContext));
@@ -535,21 +540,10 @@ public class BrokerRequestToQueryContextConverterTest {
       assertTrue(filteredAggregationFunctions.get(1).getLeft() instanceof CountAggregationFunction);
       assertEquals(filteredAggregationFunctions.get(1).getRight().toString(), "foo < '6'");
 
-      Map<FunctionContext, Integer> aggregationIndexMap = queryContext.getAggregationFunctionIndexMap();
-      assertNotNull(aggregationIndexMap);
-      assertEquals(aggregationIndexMap.size(), 1);
-      for (Map.Entry<FunctionContext, Integer> entry : aggregationIndexMap.entrySet()) {
-        FunctionContext aggregation = entry.getKey();
-        int index = entry.getValue();
-        assertEquals(aggregation.toString(), "count(*)");
-        assertTrue(index == 0 || index == 1);
-      }
-
-      Map<Pair<FunctionContext, FilterContext>, Integer> filteredAggregationsIndexMap =
-          queryContext.getFilteredAggregationsIndexMap();
-      assertNotNull(filteredAggregationsIndexMap);
-      assertEquals(filteredAggregationsIndexMap.size(), 2);
-      for (Map.Entry<Pair<FunctionContext, FilterContext>, Integer> entry : filteredAggregationsIndexMap.entrySet()) {
+      Map<Pair<FunctionContext, FilterContext>, Integer> indexMap = queryContext.getFilteredAggregationsIndexMap();
+      assertNotNull(indexMap);
+      assertEquals(indexMap.size(), 2);
+      for (Map.Entry<Pair<FunctionContext, FilterContext>, Integer> entry : indexMap.entrySet()) {
         Pair<FunctionContext, FilterContext> pair = entry.getKey();
         FunctionContext aggregation = pair.getLeft();
         FilterContext filter = pair.getRight();
@@ -595,32 +589,10 @@ public class BrokerRequestToQueryContextConverterTest {
       assertTrue(filteredAggregationFunctions.get(3).getLeft() instanceof MinAggregationFunction);
       assertEquals(filteredAggregationFunctions.get(3).getRight().toString(), "salary > '50000'");
 
-      Map<FunctionContext, Integer> aggregationIndexMap = queryContext.getAggregationFunctionIndexMap();
-      assertNotNull(aggregationIndexMap);
-      assertEquals(aggregationIndexMap.size(), 2);
-      for (Map.Entry<FunctionContext, Integer> entry : aggregationIndexMap.entrySet()) {
-        FunctionContext aggregation = entry.getKey();
-        int index = entry.getValue();
-        switch (index) {
-          case 0:
-          case 1:
-            assertEquals(aggregation.toString(), "sum(salary)");
-            break;
-          case 2:
-          case 3:
-            assertEquals(aggregation.toString(), "min(salary)");
-            break;
-          default:
-            fail();
-            break;
-        }
-      }
-
-      Map<Pair<FunctionContext, FilterContext>, Integer> filteredAggregationsIndexMap =
-          queryContext.getFilteredAggregationsIndexMap();
-      assertNotNull(filteredAggregationsIndexMap);
-      assertEquals(filteredAggregationsIndexMap.size(), 4);
-      for (Map.Entry<Pair<FunctionContext, FilterContext>, Integer> entry : filteredAggregationsIndexMap.entrySet()) {
+      Map<Pair<FunctionContext, FilterContext>, Integer> indexMap = queryContext.getFilteredAggregationsIndexMap();
+      assertNotNull(indexMap);
+      assertEquals(indexMap.size(), 4);
+      for (Map.Entry<Pair<FunctionContext, FilterContext>, Integer> entry : indexMap.entrySet()) {
         Pair<FunctionContext, FilterContext> pair = entry.getKey();
         FunctionContext aggregation = pair.getLeft();
         FilterContext filter = pair.getRight();
@@ -648,5 +620,194 @@ public class BrokerRequestToQueryContextConverterTest {
         }
       }
     }
+  }
+
+  @Test
+  public void testDeduplicateOrderByExpressions() {
+    String query = "SELECT name FROM employees ORDER BY name DESC NULLS LAST, name ASC";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    assertEquals(queryContext.getOrderByExpressions().size(), 1);
+  }
+
+  @Test
+  public void testRemoveOrderByFunctions() {
+    String query = "SELECT A FROM testTable ORDER BY datetrunc(A) DESC NULLS LAST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertFalse(orderByExpressionContext.isAsc());
+    assertTrue(orderByExpressionContext.isNullsLast());
+    assertEquals(orderByExpressionContext.getExpression().getFunction().getFunctionName(), "datetrunc");
+    assertEquals(orderByExpressionContext.getExpression().getFunction().getArguments().get(0).getIdentifier(), "A");
+  }
+
+  @Test
+  public void testOrderByDefault() {
+    String query = "SELECT A FROM testTable ORDER BY A";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertTrue(orderByExpressionContext.isAsc());
+    assertTrue(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testOrderByNullsLast() {
+    String query = "SELECT A FROM testTable ORDER BY A NULLS LAST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertTrue(orderByExpressionContext.isAsc());
+    assertTrue(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testOrderByNullsFirst() {
+    String query = "SELECT A FROM testTable ORDER BY A NULLS FIRST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertTrue(orderByExpressionContext.isAsc());
+    assertFalse(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testOrderByAscNullsFirst() {
+    String query = "SELECT A FROM testTable ORDER BY A ASC NULLS FIRST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertTrue(orderByExpressionContext.isAsc());
+    assertFalse(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testOrderByAscNullsLast() {
+    String query = "SELECT A FROM testTable ORDER BY A ASC NULLS LAST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertTrue(orderByExpressionContext.isAsc());
+    assertTrue(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testOrderByDescNullsFirst() {
+    String query = "SELECT A FROM testTable ORDER BY A DESC NULLS FIRST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertFalse(orderByExpressionContext.isAsc());
+    assertFalse(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testOrderByDescNullsLast() {
+    String query = "SELECT A FROM testTable ORDER BY A DESC NULLS LAST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertFalse(orderByExpressionContext.isAsc());
+    assertTrue(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testDistinctOrderByNullsLast() {
+    String query = "SELECT DISTINCT A FROM testTable ORDER BY A NULLS LAST";
+
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+
+    assertNotNull(queryContext.getOrderByExpressions());
+    List<OrderByExpressionContext> orderByExpressionContexts = queryContext.getOrderByExpressions();
+    assertEquals(orderByExpressionContexts.size(), 1);
+    OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
+    assertTrue(orderByExpressionContext.isAsc());
+    assertTrue(orderByExpressionContext.isNullsLast());
+  }
+
+  @Test
+  public void testConstantFilter() {
+    String query = "SELECT * FROM testTable WHERE true";
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertNull(queryContext.getFilter());
+
+    query = "SELECT * FROM testTable WHERE false";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertSame(queryContext.getFilter(), FilterContext.CONSTANT_FALSE);
+
+    query = "SELECT * FROM testTable WHERE 'true'";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertNull(queryContext.getFilter());
+
+    query = "SELECT * FROM testTable WHERE 'false'";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertSame(queryContext.getFilter(), FilterContext.CONSTANT_FALSE);
+
+    query = "SELECT * FROM testTable WHERE 1 = 1";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertNull(queryContext.getFilter());
+
+    query = "SELECT * FROM testTable WHERE 1 = 0";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertSame(queryContext.getFilter(), FilterContext.CONSTANT_FALSE);
+
+    query = "SELECT * FROM testTable WHERE 1 = 1 AND 2 = 2";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertNull(queryContext.getFilter());
+
+    query = "SELECT * FROM testTable WHERE 1 = 1 AND 2 = 3";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertSame(queryContext.getFilter(), FilterContext.CONSTANT_FALSE);
+
+    query = "SELECT * FROM testTable WHERE 1 = 1 OR 2 = 3";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertNull(queryContext.getFilter());
+
+    query = "SELECT * FROM testTable WHERE 1 = 0 OR 2 = 3";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertSame(queryContext.getFilter(), FilterContext.CONSTANT_FALSE);
+
+    query = "SELECT * FROM testTable WHERE NOT 1 = 1";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertSame(queryContext.getFilter(), FilterContext.CONSTANT_FALSE);
+
+    query = "SELECT * FROM testTable WHERE NOT 1 = 0";
+    queryContext = QueryContextConverterUtils.getQueryContext(query);
+    assertNull(queryContext.getFilter());
   }
 }

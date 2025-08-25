@@ -23,9 +23,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
-import org.apache.commons.collections.MapUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.segment.local.utils.TableConfigUtils;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
 import org.apache.pinot.spi.config.table.RoutingConfig;
@@ -33,6 +34,8 @@ import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.DateTimeFieldSpec;
+import org.apache.pinot.spi.data.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,7 +55,7 @@ public class SegmentPrunerFactory {
     boolean needsEmptySegment = TableConfigUtils.needsEmptySegmentPruner(tableConfig);
     if (needsEmptySegment) {
       // Add EmptySegmentPruner if needed
-      segmentPruners.add(new EmptySegmentPruner(tableConfig, propertyStore));
+      segmentPruners.add(new EmptySegmentPruner(tableConfig));
     }
 
     RoutingConfig routingConfig = tableConfig.getRoutingConfig();
@@ -62,7 +65,7 @@ public class SegmentPrunerFactory {
         List<SegmentPruner> configuredSegmentPruners = new ArrayList<>(segmentPrunerTypes.size());
         for (String segmentPrunerType : segmentPrunerTypes) {
           if (RoutingConfig.PARTITION_SEGMENT_PRUNER_TYPE.equalsIgnoreCase(segmentPrunerType)) {
-            SegmentPruner partitionSegmentPruner = getPartitionSegmentPruner(tableConfig, propertyStore);
+            SegmentPruner partitionSegmentPruner = getPartitionSegmentPruner(tableConfig);
             if (partitionSegmentPruner != null) {
               configuredSegmentPruners.add(partitionSegmentPruner);
             }
@@ -85,7 +88,7 @@ public class SegmentPrunerFactory {
         if ((tableType == TableType.OFFLINE && LEGACY_PARTITION_AWARE_OFFLINE_ROUTING.equalsIgnoreCase(
             routingTableBuilderName)) || (tableType == TableType.REALTIME
             && LEGACY_PARTITION_AWARE_REALTIME_ROUTING.equalsIgnoreCase(routingTableBuilderName))) {
-          SegmentPruner partitionSegmentPruner = getPartitionSegmentPruner(tableConfig, propertyStore);
+          SegmentPruner partitionSegmentPruner = getPartitionSegmentPruner(tableConfig);
           if (partitionSegmentPruner != null) {
             segmentPruners.add(partitionSegmentPruner);
           }
@@ -96,8 +99,7 @@ public class SegmentPrunerFactory {
   }
 
   @Nullable
-  private static SegmentPruner getPartitionSegmentPruner(TableConfig tableConfig,
-      ZkHelixPropertyStore<ZNRecord> propertyStore) {
+  private static SegmentPruner getPartitionSegmentPruner(TableConfig tableConfig) {
     String tableNameWithType = tableConfig.getTableName();
     SegmentPartitionConfig segmentPartitionConfig = tableConfig.getIndexingConfig().getSegmentPartitionConfig();
     if (segmentPartitionConfig == null) {
@@ -113,8 +115,8 @@ public class SegmentPrunerFactory {
     LOGGER.info("Using PartitionSegmentPruner on partition columns: {} for table: {}", partitionColumns,
         tableNameWithType);
     return partitionColumns.size() == 1 ? new SinglePartitionColumnSegmentPruner(tableNameWithType,
-        partitionColumns.iterator().next(), propertyStore)
-        : new MultiPartitionColumnsSegmentPruner(tableNameWithType, partitionColumns, propertyStore);
+        partitionColumns.iterator().next())
+        : new MultiPartitionColumnsSegmentPruner(tableNameWithType, partitionColumns);
   }
 
   @Nullable
@@ -131,9 +133,20 @@ public class SegmentPrunerFactory {
       LOGGER.warn("Cannot enable time range pruning without time column for table: {}", tableNameWithType);
       return null;
     }
-
-    LOGGER.info("Using TimeRangePruner on time column: {} for table: {}", timeColumn, tableNameWithType);
-    return new TimeSegmentPruner(tableConfig, propertyStore);
+    Schema schema = ZKMetadataProvider.getTableSchema(propertyStore, tableConfig);
+    if (schema == null) {
+      LOGGER.warn("Cannot enable time range pruning without schema for table: {}", tableNameWithType);
+      return null;
+    }
+    DateTimeFieldSpec timeFieldSpec = schema.getSpecForTimeColumn(timeColumn);
+    if (timeFieldSpec == null) {
+      LOGGER.warn("Cannot enable time range pruning without field spec for table: {}, time column: {}",
+          tableNameWithType, timeColumn);
+      return null;
+    }
+    LOGGER.info("Using TimeRangePruner on time column: {} for table: {} with DateTimeFieldSpec: {}", timeColumn,
+        tableNameWithType, timeFieldSpec);
+    return new TimeSegmentPruner(tableConfig, timeFieldSpec);
   }
 
   private static List<SegmentPruner> sortSegmentPruners(List<SegmentPruner> pruners) {

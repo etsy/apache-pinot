@@ -19,14 +19,21 @@
 package org.apache.pinot.broker.requesthandler;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.annotations.VisibleForTesting;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.commons.httpclient.HttpConnectionManager;
+import javax.ws.rs.core.HttpHeaders;
+import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.pinot.broker.api.RequesterIdentity;
 import org.apache.pinot.common.response.BrokerResponse;
 import org.apache.pinot.spi.trace.RequestContext;
+import org.apache.pinot.spi.trace.RequestScope;
+import org.apache.pinot.spi.trace.Tracing;
+import org.apache.pinot.spi.utils.CommonConstants.Broker.Request;
+import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.sql.parsers.SqlNodeAndOptions;
 
 
@@ -38,13 +45,18 @@ public interface BrokerRequestHandler {
   void shutDown();
 
   BrokerResponse handleRequest(JsonNode request, @Nullable SqlNodeAndOptions sqlNodeAndOptions,
-      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext)
+      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, @Nullable HttpHeaders httpHeaders)
       throws Exception;
 
-  default BrokerResponse handleRequest(JsonNode request, @Nullable RequesterIdentity requesterIdentity,
-      RequestContext requestContext)
+  @VisibleForTesting
+  default BrokerResponse handleRequest(String sql)
       throws Exception {
-    return handleRequest(request, null, requesterIdentity, requestContext);
+    ObjectNode request = JsonUtils.newObjectNode();
+    request.put(Request.SQL, sql);
+    try (RequestScope requestContext = Tracing.getTracer().createRequestScope()) {
+      requestContext.setRequestArrivalTimeMillis(System.currentTimeMillis());
+      return handleRequest(request, null, null, requestContext, null);
+    }
   }
 
   Map<Long, String> getRunningQueries();
@@ -59,7 +71,7 @@ public interface BrokerRequestHandler {
    * @param serverResponses to collect cancel responses from all servers if a map is provided
    * @return true if there is a running query for the given queryId.
    */
-  boolean cancelQuery(long queryId, int timeoutMs, Executor executor, HttpConnectionManager connMgr,
+  boolean cancelQuery(long queryId, int timeoutMs, Executor executor, HttpClientConnectionManager connMgr,
       Map<String, Integer> serverResponses)
       throws Exception;
 }

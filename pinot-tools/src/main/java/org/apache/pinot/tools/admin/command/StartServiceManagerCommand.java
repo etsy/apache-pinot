@@ -31,7 +31,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.pinot.controller.ControllerConf;
-import org.apache.pinot.query.service.QueryConfig;
 import org.apache.pinot.spi.services.ServiceRole;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.tools.Command;
@@ -68,20 +67,20 @@ public class StartServiceManagerCommand extends AbstractBaseAdminCommand impleme
   // TODO: support forbids = {"-bootstrapConfigPaths", "-bootstrapServices"})
   private String _zkAddress = DEFAULT_ZK_ADDRESS;
   @CommandLine.Option(names = {"-clusterName"}, required = false, description = "Pinot cluster name.")
-      // TODO: support forbids = {"-bootstrapConfigPaths", "-bootstrapServices"})
+  // TODO: support forbids = {"-bootstrapConfigPaths", "-bootstrapServices"})
   private String _clusterName = DEFAULT_CLUSTER_NAME;
   @CommandLine.Option(names = {"-port"}, required = false,
       description = "Pinot service manager admin port, -1 means disable, 0 means a random available port.")
-      // TODO: support forbids = {"-bootstrapConfigPaths", "-bootstrapServices"})
+  // TODO: support forbids = {"-bootstrapConfigPaths", "-bootstrapServices"})
   private int _port = -1;
   @CommandLine.Option(names = {"-bootstrapConfigPaths"}, required = false, arity = "1..*",
       description = "A list of Pinot service config file paths. Each config file requires an extra config:"
           + " 'pinot.service.role' to indicate which service to start.")
-      // TODO: support forbids = {"-zkAddress", "-clusterName", "-port", "-bootstrapServices"})
+  // TODO: support forbids = {"-zkAddress", "-clusterName", "-port", "-bootstrapServices"})
   private String[] _bootstrapConfigPaths;
   @CommandLine.Option(names = {"-bootstrapServices"}, required = false, arity = "1..*",
       description = "A list of Pinot service roles to start with default config. E.g. CONTROLLER/BROKER/SERVER")
-      // TODO: support forbids = {"-zkAddress", "-clusterName", "-port", "-bootstrapConfigPaths"})
+  // TODO: support forbids = {"-zkAddress", "-clusterName", "-port", "-bootstrapConfigPaths"})
   private String[] _bootstrapServices = BOOTSTRAP_SERVICES;
 
   private PinotServiceManager _pinotServiceManager;
@@ -174,7 +173,7 @@ public class StartServiceManagerCommand extends AbstractBaseAdminCommand impleme
   public boolean execute()
       throws Exception {
     try {
-      LOGGER.info("Executing command: " + toString());
+      LOGGER.info("Executing command: {}", toString());
       if (!startPinotService("SERVICE_MANAGER", this::startServiceManager)) {
         return false;
       }
@@ -198,8 +197,8 @@ public class StartServiceManagerCommand extends AbstractBaseAdminCommand impleme
         savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
         return true;
       }
-    } catch (Exception e) {
-      LOGGER.error("Caught exception while starting pinot service, exiting.", e);
+    } catch (Throwable t) {
+      LOGGER.error("Caught exception while starting pinot service, exiting.", t);
     }
     System.exit(-1);
     return false;
@@ -220,12 +219,14 @@ public class StartServiceManagerCommand extends AbstractBaseAdminCommand impleme
       case BROKER:
         return PinotConfigUtils
             .generateBrokerConf(_clusterName, _zkAddress, null, CommonConstants.Helix.DEFAULT_BROKER_QUERY_PORT,
-                QueryConfig.DEFAULT_QUERY_RUNNER_PORT);
+                CommonConstants.MultiStageQueryRunner.DEFAULT_QUERY_RUNNER_PORT);
       case SERVER:
         return PinotConfigUtils
             .generateServerConf(_clusterName, _zkAddress, null, CommonConstants.Helix.DEFAULT_SERVER_NETTY_PORT,
                 CommonConstants.Server.DEFAULT_ADMIN_API_PORT, CommonConstants.Server.DEFAULT_GRPC_PORT,
-                QueryConfig.DEFAULT_QUERY_SERVER_PORT, QueryConfig.DEFAULT_QUERY_RUNNER_PORT, null, null);
+                CommonConstants.MultiStageQueryRunner.DEFAULT_QUERY_SERVER_PORT,
+                CommonConstants.MultiStageQueryRunner.DEFAULT_QUERY_RUNNER_PORT,
+                null, null);
       default:
         throw new RuntimeException("No default config found for service role: " + serviceRole);
     }
@@ -303,8 +304,8 @@ public class StartServiceManagerCommand extends AbstractBaseAdminCommand impleme
       LOGGER.info("Starting a Pinot [{}] at {}s since launch", role, startOffsetSeconds());
       String instanceId = serviceStarter.call();
       LOGGER.info("Started Pinot [{}] instance [{}] at {}s since launch", role, instanceId, startOffsetSeconds());
-    } catch (Exception e) {
-      LOGGER.error(String.format("Failed to start a Pinot [%s] at %s since launch", role, startOffsetSeconds()), e);
+    } catch (Throwable t) {
+      LOGGER.error(String.format("Failed to start a Pinot [%s] at %s since launch", role, startOffsetSeconds()), t);
       return false;
     }
     return true;

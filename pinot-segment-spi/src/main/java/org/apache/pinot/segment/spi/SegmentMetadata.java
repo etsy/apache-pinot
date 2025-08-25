@@ -22,7 +22,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
@@ -90,6 +92,7 @@ public interface SegmentMetadata {
    */
   long getLatestIngestionTimestamp();
 
+  @Nullable
   List<StarTreeV2Metadata> getStarTreeV2MetadataList();
 
   Map<String, String> getCustomMap();
@@ -98,11 +101,11 @@ public interface SegmentMetadata {
 
   String getEndOffset();
 
-  default Set<String> getAllColumns() {
+  default NavigableSet<String> getAllColumns() {
     return getSchema().getColumnNames();
   }
 
-  Map<String, ColumnMetadata> getColumnMetadataMap();
+  TreeMap<String, ColumnMetadata> getColumnMetadataMap();
 
   default ColumnMetadata getColumnMetadataFor(String column) {
     return getColumnMetadataMap().get(column);

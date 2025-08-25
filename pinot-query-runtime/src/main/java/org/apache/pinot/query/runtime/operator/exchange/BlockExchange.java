@@ -20,72 +20,97 @@ package org.apache.pinot.query.runtime.operator.exchange;
 
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import org.apache.calcite.rel.RelDistribution;
 import org.apache.pinot.common.datablock.DataBlock;
-import org.apache.pinot.query.mailbox.MailboxIdentifier;
-import org.apache.pinot.query.mailbox.MailboxService;
 import org.apache.pinot.query.mailbox.SendingMailbox;
-import org.apache.pinot.query.planner.partitioning.KeySelector;
+import org.apache.pinot.query.planner.partitioning.KeySelectorFactory;
 import org.apache.pinot.query.runtime.blocks.BlockSplitter;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
+import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
 
 
 /**
- * This class contains the shared logic across all different exchange types for
- * exchanging data across different servers.
+ * This class contains the shared logic across all different exchange types for exchanging data across servers.
  */
 public abstract class BlockExchange {
   // TODO: Deduct this value via grpc config maximum byte size; and make it configurable with override.
   // TODO: Max block size is a soft limit. only counts fixedSize datatable byte buffer
   private static final int MAX_MAILBOX_CONTENT_SIZE_BYTES = 4 * 1024 * 1024;
 
-  private final MailboxService<TransferableBlock> _mailbox;
-  private final List<MailboxIdentifier> _destinations;
+  private final List<SendingMailbox> _sendingMailboxes;
   private final BlockSplitter _splitter;
 
-  public static BlockExchange getExchange(MailboxService<TransferableBlock> mailboxService,
-      List<MailboxIdentifier> destinations, RelDistribution.Type exchangeType,
-      KeySelector<Object[], Object[]> selector, BlockSplitter splitter) {
-    switch (exchangeType) {
+  public static BlockExchange getExchange(List<SendingMailbox> sendingMailboxes, RelDistribution.Type distributionType,
+      List<Integer> keys, BlockSplitter splitter) {
+    switch (distributionType) {
       case SINGLETON:
-        return new SingletonExchange(mailboxService, destinations, splitter);
+        return new SingletonExchange(sendingMailboxes, splitter);
       case HASH_DISTRIBUTED:
-        return new HashExchange(mailboxService, destinations, selector, splitter);
+        return new HashExchange(sendingMailboxes, KeySelectorFactory.getKeySelector(keys), splitter);
       case RANDOM_DISTRIBUTED:
-        return new RandomExchange(mailboxService, destinations, splitter);
+        return new RandomExchange(sendingMailboxes, splitter);
       case BROADCAST_DISTRIBUTED:
-        return new BroadcastExchange(mailboxService, destinations, splitter);
+        return new BroadcastExchange(sendingMailboxes, splitter);
       case ROUND_ROBIN_DISTRIBUTED:
       case RANGE_DISTRIBUTED:
       case ANY:
       default:
-        throw new UnsupportedOperationException("Unsupported mailbox exchange type: " + exchangeType);
+        throw new UnsupportedOperationException("Unsupported distribution type: " + distributionType);
     }
   }
 
-  protected BlockExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-      BlockSplitter splitter) {
-    _mailbox = mailbox;
-    _destinations = destinations;
+  protected BlockExchange(List<SendingMailbox> sendingMailboxes, BlockSplitter splitter) {
+    _sendingMailboxes = sendingMailboxes;
     _splitter = splitter;
   }
 
-  public void send(TransferableBlock block) {
-    if (block.isEndOfStreamBlock()) {
-      _destinations.forEach(destination -> sendBlock(destination, block));
-      return;
+  /**
+   * API to send a block to the destination mailboxes.
+   * @param block the block to be transferred
+   * @return true if all the mailboxes has been early terminated.
+   * @throws Exception when sending stream unexpectedly closed.
+   */
+  public boolean send(TransferableBlock block)
+      throws Exception {
+    if (block.isErrorBlock()) {
+      // Send error block to all mailboxes to propagate the error
+      for (SendingMailbox sendingMailbox : _sendingMailboxes) {
+        sendBlock(sendingMailbox, block);
+      }
+      return false;
     }
 
-    Iterator<RoutedBlock> routedBlocks = route(_destinations, block);
-    while (routedBlocks.hasNext()) {
-      RoutedBlock next = routedBlocks.next();
-      sendBlock(next._destination, next._block);
+    if (block.isSuccessfulEndOfStreamBlock()) {
+      // Send metadata to only one randomly picked mailbox, and empty EOS block to other mailboxes
+      int numMailboxes = _sendingMailboxes.size();
+      int mailboxIdToSendMetadata = ThreadLocalRandom.current().nextInt(numMailboxes);
+      assert block.getQueryStats() != null;
+      for (int i = 0; i < numMailboxes; i++) {
+        SendingMailbox sendingMailbox = _sendingMailboxes.get(i);
+        TransferableBlock blockToSend =
+            i == mailboxIdToSendMetadata ? block : TransferableBlockUtils.getEndOfStreamTransferableBlock();
+        sendBlock(sendingMailbox, blockToSend);
+      }
+      return false;
     }
+
+    assert block.isDataBlock();
+    boolean isEarlyTerminated = true;
+    for (SendingMailbox sendingMailbox : _sendingMailboxes) {
+      if (!sendingMailbox.isEarlyTerminated()) {
+        isEarlyTerminated = false;
+        break;
+      }
+    }
+    if (!isEarlyTerminated) {
+      route(_sendingMailboxes, block);
+    }
+    return isEarlyTerminated;
   }
 
-  private void sendBlock(MailboxIdentifier mailboxId, TransferableBlock block) {
-    SendingMailbox<TransferableBlock> sendingMailbox = _mailbox.getSendingMailbox(mailboxId);
-
+  protected void sendBlock(SendingMailbox sendingMailbox, TransferableBlock block)
+      throws Exception {
     if (block.isEndOfStreamBlock()) {
       sendingMailbox.send(block);
       sendingMailbox.complete();
@@ -94,21 +119,22 @@ public abstract class BlockExchange {
 
     DataBlock.Type type = block.getType();
     Iterator<TransferableBlock> splits = _splitter.split(block, type, MAX_MAILBOX_CONTENT_SIZE_BYTES);
-
     while (splits.hasNext()) {
       sendingMailbox.send(splits.next());
     }
   }
 
-  protected abstract Iterator<RoutedBlock> route(List<MailboxIdentifier> destinations, TransferableBlock block);
+  protected abstract void route(List<SendingMailbox> destinations, TransferableBlock block)
+      throws Exception;
 
-  protected static class RoutedBlock {
-    final MailboxIdentifier _destination;
-    final TransferableBlock _block;
+  // Called when the OpChain gracefully returns.
+  // TODO: This is a no-op right now.
+  public void close() {
+  }
 
-    protected RoutedBlock(MailboxIdentifier destination, TransferableBlock block) {
-      _destination = destination;
-      _block = block;
+  public void cancel(Throwable t) {
+    for (SendingMailbox sendingMailbox : _sendingMailboxes) {
+      sendingMailbox.cancel(t);
     }
   }
 }

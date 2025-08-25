@@ -67,8 +67,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     } else {
       StreamConfig streamConfig = FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs();
       return new TableConfigBuilder(TableType.REALTIME).setTableName(tableName).setTimeColumnName("timeColumn")
-          .setRetentionTimeUnit("DAYS").setLLC(true).setRetentionTimeValue("5")
-          .setStreamConfigs(streamConfig.getStreamConfigsMap());
+          .setRetentionTimeUnit("DAYS").setRetentionTimeValue("5").setStreamConfigs(streamConfig.getStreamConfigsMap());
     }
   }
 
@@ -486,6 +485,46 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
   }
 
   @Test
+  public void testForceUpdateTableSchemaAndConfigs()
+      throws IOException {
+    String tableName = "testUpdate1";
+    TableConfig offlineTableConfig = createOfflineTableConfig(tableName);
+    Schema schema = createDummySchema(tableName);
+    TableConfigs tableConfigs = new TableConfigs(tableName, schema, offlineTableConfig, null);
+
+    sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
+    String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
+    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    Assert.assertNotNull(tableConfigs.getOffline());
+
+    // Remove field from schema and try to update schema without the 'forceTableSchemaUpdate' option
+    schema.removeField("dimA");
+    tableConfigs =
+        new TableConfigs(tableName, schema, tableConfigsResponse.getOffline(), tableConfigsResponse.getRealtime());
+
+    String tableConfigUpdateUrl = DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsUpdate(tableName);
+    try {
+      sendPutRequest(tableConfigUpdateUrl, tableConfigs.toPrettyJsonString());
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage().contains("is not backward-compatible with the existing schema"));
+    }
+
+    // Skip validate table configs – Exception is still thrown
+    String newTableConfigUpdateUrl = tableConfigUpdateUrl + "?validationTypesToSkip=ALL";
+    try {
+      sendPutRequest(newTableConfigUpdateUrl, tableConfigs.toPrettyJsonString());
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage().contains("is not backward-compatible with the existing schema"));
+    }
+
+    // Skip table config validation as well as force update the table schema – no exceptions are thrown
+    newTableConfigUpdateUrl = tableConfigUpdateUrl + "?validationTypesToSkip=ALL&forceTableSchemaUpdate=true";
+    response = sendPutRequest(newTableConfigUpdateUrl, tableConfigs.toPrettyJsonString());
+    Assert.assertTrue(response.contains("TableConfigs updated for testUpdate1"));
+    sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsDelete(tableName));
+  }
+
+  @Test
   public void testDeleteConfig()
       throws Exception {
     // create with 1 config
@@ -561,14 +600,10 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
   @Test
   public void testGetConfigCompatibility()
       throws IOException {
-    // Should not fail if schema name does not match raw table name in the case they are created separately
-    String schemaName = "schema1";
-    Schema schema = createDummySchema(schemaName);
-    sendPostRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forSchemaCreate(), schema.toPrettyJsonString());
     String tableName = "table1";
+    DEFAULT_INSTANCE.addDummySchema(tableName);
     TableConfig offlineTableConfig = createOfflineTableConfig(tableName);
     SegmentsValidationAndRetentionConfig validationConfig = new SegmentsValidationAndRetentionConfig();
-    validationConfig.setSchemaName(schemaName);
     validationConfig.setReplication("1");
     offlineTableConfig.setValidationConfig(validationConfig);
     sendPostRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableCreate(),
@@ -578,11 +613,11 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
-    Assert.assertEquals(tableConfigsResponse.getSchema().getSchemaName(), schema.getSchemaName());
+    Assert.assertEquals(tableConfigsResponse.getSchema().getSchemaName(), tableName);
 
     // Delete
     sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableDelete(tableName));
-    sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forSchemaDelete(schemaName));
+    sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forSchemaDelete(tableName));
   }
 
   @AfterClass

@@ -47,11 +47,6 @@ public interface AggregationFunction<IntermediateResult, FinalResult extends Com
   AggregationFunctionType getType();
 
   /**
-   * Returns the result column name for the given aggregation column, e.g. 'SUM(foo)' -> 'sum_foo'.
-   */
-  String getColumnName();
-
-  /**
    * Returns the column name to be used in the data schema of results.
    * e.g. 'MINMAXRANGEMV( foo)' -> 'minmaxrangemv(foo)', 'PERCENTILE75(bar)' -> 'percentile75(bar)'
    */
@@ -128,6 +123,14 @@ public interface AggregationFunction<IntermediateResult, FinalResult extends Com
    * TODO: Support serializing/deserializing null values in DataTable and use null as the empty intermediate result
    */
   FinalResult extractFinalResult(IntermediateResult intermediateResult);
+
+  /**
+   * Merges two final results. This can be used to optimized certain functions (e.g. DISTINCT_COUNT) when data is
+   * partitioned on each server, where we may directly request servers to return final result and merge them on broker.
+   */
+  default FinalResult mergeFinalResult(FinalResult finalResult1, FinalResult finalResult2) {
+    throw new UnsupportedOperationException("Cannot merge final results for function: " + getType());
+  }
 
   /** @return Description of this operator for Explain Plan */
   String toExplainString();

@@ -34,6 +34,7 @@ import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.data.table.Key;
+import org.apache.pinot.core.operator.docvalsets.RowBasedBlockValSet;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionFactory;
 import org.apache.pinot.core.query.aggregation.function.CountAggregationFunction;
@@ -272,7 +273,8 @@ public class GapfillProcessor extends BaseGapfillProcessor {
     Map<ExpressionContext, BlockValSet> blockValSetMap = new HashMap<>();
     for (int i = 1; i < dataSchema.getColumnNames().length; i++) {
       blockValSetMap.put(ExpressionContext.forIdentifier(dataSchema.getColumnName(i)),
-          new RowBasedBlockValSet(dataSchema.getColumnDataType(i), bucketedRows, i));
+          new RowBasedBlockValSet(dataSchema.getColumnDataType(i), bucketedRows, i,
+              _queryContext.isNullHandlingEnabled()));
     }
 
     for (int i = 0; i < _queryContext.getSelectExpressions().size(); i++) {
@@ -280,7 +282,7 @@ public class GapfillProcessor extends BaseGapfillProcessor {
       if (expressionContext.getType() == ExpressionContext.Type.FUNCTION) {
         FunctionContext functionContext = expressionContext.getFunction();
         AggregationFunction aggregationFunction =
-            AggregationFunctionFactory.getAggregationFunction(functionContext, _queryContext);
+            AggregationFunctionFactory.getAggregationFunction(functionContext, _queryContext.isNullHandlingEnabled());
         GroupByResultHolder groupByResultHolder =
             aggregationFunction.createGroupByResultHolder(groupKeyIndexes.size(), groupKeyIndexes.size());
         if (aggregationFunction instanceof CountAggregationFunction) {
@@ -305,10 +307,10 @@ public class GapfillProcessor extends BaseGapfillProcessor {
     if (expressionContext != null && expressionContext.getFunction() != null && GapfillUtils
         .isFill(expressionContext)) {
       List<ExpressionContext> args = expressionContext.getFunction().getArguments();
-      if (args.get(1).getLiteralString() == null) {
+      if (args.get(1).getLiteral() == null) {
         throw new UnsupportedOperationException("Wrong Sql.");
       }
-      GapfillUtils.FillType fillType = GapfillUtils.FillType.valueOf(args.get(1).getLiteralString());
+      GapfillUtils.FillType fillType = GapfillUtils.FillType.valueOf(args.get(1).getLiteral().getStringValue());
       if (fillType == GapfillUtils.FillType.FILL_DEFAULT_VALUE) {
         // TODO: may fill the default value from sql in the future.
         return GapfillUtils.getDefaultValue(dataType);

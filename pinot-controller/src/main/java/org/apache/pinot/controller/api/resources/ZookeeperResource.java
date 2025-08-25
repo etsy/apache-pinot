@@ -44,6 +44,7 @@ import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
+import javax.ws.rs.POST;
 import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
@@ -51,13 +52,17 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.helix.AccessOption;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.introspect.CodehausJacksonIntrospector;
 import org.apache.pinot.controller.api.access.AccessType;
 import org.apache.pinot.controller.api.access.Authenticate;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
@@ -92,6 +97,7 @@ public class ZookeeperResource {
 
   @GET
   @Path("/zk/get")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_ZNODE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get content of the znode")
   @ApiResponses(value = {
@@ -120,6 +126,7 @@ public class ZookeeperResource {
 
   @DELETE
   @Path("/zk/delete")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.DELETE_ZNODE)
   @Authenticate(AccessType.DELETE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Delete the znode at this path")
@@ -145,6 +152,7 @@ public class ZookeeperResource {
 
   @PUT
   @Path("/zk/putChildren")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.UPDATE_ZNODE)
   @Authenticate(AccessType.UPDATE)
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
@@ -199,6 +207,7 @@ public class ZookeeperResource {
 
   @PUT
   @Path("/zk/put")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.UPDATE_ZNODE)
   @Authenticate(AccessType.UPDATE)
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
@@ -249,8 +258,69 @@ public class ZookeeperResource {
     }
   }
 
+  @POST
+  @Path("/zk/create")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.UPDATE_ZNODE)
+  @Authenticate(AccessType.CREATE)
+  @Produces(MediaType.APPLICATION_JSON)
+  @Consumes(MediaType.APPLICATION_JSON)
+  @ApiOperation(value = "Create a node at a given path")
+  @ApiResponses(value = {
+      @ApiResponse(code = 200, message = "Success"), @ApiResponse(code = 204, message = "No Content"),
+      @ApiResponse(code = 400, message = "Bad Request"), @ApiResponse(code = 500, message = "Internal server error")
+  })
+  public SuccessResponse createNode(
+      @ApiParam(value = "Zookeeper Path, must start with /", required = true) @QueryParam("path") String path,
+      @ApiParam(value = "TTL of the node. TTL are only honoured for persistent znodes (access option = 0x40 or 0x80),"
+          + " in which case TTL should be > 0. If access option is not 0x40 or 0x80, it will be ignored, and we can "
+          + "set it to any value, or just ignore it", defaultValue = "-1") @QueryParam("ttl") @DefaultValue("-1")
+      int ttl, @ApiParam(value = "accessOption", defaultValue = "1") @QueryParam("accessOption") @DefaultValue("1")
+  int accessOption, String payload) {
+
+    path = validateAndNormalizeZKPath(path, false);
+
+    //validate ttl range
+    if ((accessOption == AccessOption.PERSISTENT_WITH_TTL
+        || accessOption == AccessOption.PERSISTENT_SEQUENTIAL_WITH_TTL) && ttl <= 0) {
+      throw new ControllerApplicationException(LOGGER, "TTL for persistent nodes should be > 0",
+          Response.Status.BAD_REQUEST);
+    }
+
+    if (StringUtils.isEmpty(payload)) {
+      throw new ControllerApplicationException(LOGGER, "Must provide payload", Response.Status.BAD_REQUEST);
+    }
+    ZNRecord znRecord;
+    try {
+      znRecord = MAPPER.readValue(payload, ZNRecord.class);
+    } catch (Exception e) {
+      throw new ControllerApplicationException(LOGGER, "Failed to deserialize the data", Response.Status.BAD_REQUEST,
+          e);
+    }
+
+    boolean result;
+    try {
+      result = _pinotHelixResourceManager.createZKNode(path, znRecord, accessOption, ttl);
+    } catch (Exception e) {
+      throw new ControllerApplicationException(LOGGER, "Failed to create znode at path: " + path,
+          Response.Status.INTERNAL_SERVER_ERROR, e);
+    }
+    if (result) {
+      return new SuccessResponse("Successfully created node at path: " + path);
+    } else {
+      //check if node already exists
+      if (_pinotHelixResourceManager.getZKStat(path) != null) {
+        throw new ControllerApplicationException(LOGGER, "ZNode already exists at path: " + path,
+            Response.Status.BAD_REQUEST);
+      } else {
+        throw new ControllerApplicationException(LOGGER, "Failed to create znode at path: " + path,
+            Response.Status.INTERNAL_SERVER_ERROR);
+      }
+    }
+  }
+
   @GET
   @Path("/zk/ls")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_ZNODE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "List the child znodes")
   @ApiResponses(value = {
@@ -273,6 +343,7 @@ public class ZookeeperResource {
 
   @GET
   @Path("/zk/getChildren")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_ZNODE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get all child znodes")
   @ApiResponses(value = {
@@ -307,6 +378,7 @@ public class ZookeeperResource {
 
   @GET
   @Path("/zk/lsl")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_ZNODE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "List the child znodes along with Stats")
   @ApiResponses(value = {
@@ -330,6 +402,7 @@ public class ZookeeperResource {
 
   @GET
   @Path("/zk/stat")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_ZNODE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get the stat",
       notes = " Use this api to fetch additional details of a znode such as creation time, modified time, numChildren"

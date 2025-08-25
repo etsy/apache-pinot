@@ -20,16 +20,21 @@ package org.apache.pinot.broker.broker;
 
 import com.google.common.base.Preconditions;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
+import javax.ws.rs.NotAuthorizedException;
 import org.apache.pinot.broker.api.AccessControl;
 import org.apache.pinot.broker.api.HttpRequesterIdentity;
 import org.apache.pinot.broker.api.RequesterIdentity;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.core.auth.BasicAuthPrincipal;
 import org.apache.pinot.core.auth.BasicAuthUtils;
+import org.apache.pinot.spi.auth.AuthorizationResult;
+import org.apache.pinot.spi.auth.TableAuthorizationResult;
 import org.apache.pinot.spi.env.PinotConfiguration;
 
 
@@ -76,33 +81,70 @@ public class BasicAuthAccessControlFactory extends AccessControlFactory {
     }
 
     @Override
-    public boolean hasAccess(RequesterIdentity requesterIdentity) {
-      return hasAccess(requesterIdentity, null);
+    public AuthorizationResult authorize(RequesterIdentity requesterIdentity) {
+      return authorize(requesterIdentity, (BrokerRequest) null);
     }
 
     @Override
-    public boolean hasAccess(RequesterIdentity requesterIdentity, BrokerRequest brokerRequest) {
-      Preconditions.checkArgument(requesterIdentity instanceof HttpRequesterIdentity, "HttpRequesterIdentity required");
-      HttpRequesterIdentity identity = (HttpRequesterIdentity) requesterIdentity;
-
-      Collection<String> tokens = identity.getHttpHeaders().get(HEADER_AUTHORIZATION);
-      Optional<BasicAuthPrincipal> principalOpt =
-          tokens.stream().map(BasicAuthUtils::normalizeBase64Token).map(_token2principal::get).filter(Objects::nonNull)
-              .findFirst();
+    public AuthorizationResult authorize(RequesterIdentity requesterIdentity, BrokerRequest brokerRequest) {
+      Optional<BasicAuthPrincipal> principalOpt = getPrincipalOpt(requesterIdentity);
 
       if (!principalOpt.isPresent()) {
-        // no matching token? reject
-        return false;
+        throw new NotAuthorizedException("Basic");
       }
 
       BasicAuthPrincipal principal = principalOpt.get();
       if (brokerRequest == null || !brokerRequest.isSetQuerySource() || !brokerRequest.getQuerySource()
           .isSetTableName()) {
         // no table restrictions? accept
-        return true;
+        return TableAuthorizationResult.success();
       }
 
-      return principal.hasTable(brokerRequest.getQuerySource().getTableName());
+      Set<String> failedTables = new HashSet<>();
+
+      if (!principal.hasTable(brokerRequest.getQuerySource().getTableName())) {
+        failedTables.add(brokerRequest.getQuerySource().getTableName());
+      }
+      if (failedTables.isEmpty()) {
+        return TableAuthorizationResult.success();
+      }
+      return new TableAuthorizationResult(failedTables);
+    }
+
+    @Override
+    public TableAuthorizationResult authorize(RequesterIdentity requesterIdentity, Set<String> tables) {
+      Optional<BasicAuthPrincipal> principalOpt = getPrincipalOpt(requesterIdentity);
+
+      if (!principalOpt.isPresent()) {
+        throw new NotAuthorizedException("Basic");
+      }
+
+      if (tables == null || tables.isEmpty()) {
+        return TableAuthorizationResult.success();
+      }
+      BasicAuthPrincipal principal = principalOpt.get();
+      Set<String> failedTables = new HashSet<>();
+      for (String table : tables) {
+        if (!principal.hasTable(table)) {
+          failedTables.add(table);
+        }
+      }
+      if (failedTables.isEmpty()) {
+        return TableAuthorizationResult.success();
+      }
+      return new TableAuthorizationResult(failedTables);
+    }
+
+    private Optional<BasicAuthPrincipal> getPrincipalOpt(RequesterIdentity requesterIdentity) {
+      Preconditions.checkArgument(requesterIdentity instanceof HttpRequesterIdentity, "HttpRequesterIdentity required");
+      HttpRequesterIdentity identity = (HttpRequesterIdentity) requesterIdentity;
+
+      Collection<String> tokens = identity.getHttpHeaders().get(HEADER_AUTHORIZATION);
+      Optional<BasicAuthPrincipal> principalOpt =
+          tokens.stream().map(org.apache.pinot.common.auth.BasicAuthUtils::normalizeBase64Token)
+              .map(_token2principal::get).filter(Objects::nonNull)
+              .findFirst();
+      return principalOpt;
     }
   }
 }

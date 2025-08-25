@@ -21,9 +21,11 @@ package org.apache.pinot.segment.local.segment.index.readers;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import java.math.BigDecimal;
 import java.util.Arrays;
+import javax.annotation.Nullable;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.utils.FALFInterner;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -38,37 +40,32 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * <p>This helps avoid creation of String from byte[], which is expensive as well as creates garbage.
  */
 public class OnHeapStringDictionary extends BaseImmutableDictionary {
-  private final byte _paddingByte;
   private final String[] _unpaddedStrings;
   private final byte[][] _unpaddedBytes;
-
   private final Object2IntOpenHashMap<String> _unPaddedStringToIdMap;
-  private final String[] _paddedStrings;
 
-  public OnHeapStringDictionary(PinotDataBuffer dataBuffer, int length, int numBytesPerValue, byte paddingByte) {
-    super(dataBuffer, length, numBytesPerValue, paddingByte);
-
-    _paddingByte = paddingByte;
-    byte[] buffer = new byte[numBytesPerValue];
+  public OnHeapStringDictionary(PinotDataBuffer dataBuffer, int length, int numBytesPerValue,
+      @Nullable FALFInterner<String> strInterner, @Nullable FALFInterner<byte[]> byteInterner) {
+    super(dataBuffer, length, numBytesPerValue);
 
     _unpaddedBytes = new byte[length][];
     _unpaddedStrings = new String[length];
     _unPaddedStringToIdMap = new Object2IntOpenHashMap<>(length);
     _unPaddedStringToIdMap.defaultReturnValue(Dictionary.NULL_VALUE_INDEX);
 
-    for (int i = 0; i < length; i++) {
-      _unpaddedBytes[i] = getUnpaddedBytes(i, buffer);
-      _unpaddedStrings[i] = new String(_unpaddedBytes[i], UTF_8);
-      _unPaddedStringToIdMap.put(_unpaddedStrings[i], i);
-    }
+    byte[] buffer = new byte[numBytesPerValue];
+    boolean enableInterning = strInterner != null && byteInterner != null;
 
-    if (paddingByte == 0) {
-      _paddedStrings = null;
-    } else {
-      _paddedStrings = new String[length];
-      for (int i = 0; i < length; i++) {
-        _paddedStrings[i] = getPaddedString(i, buffer);
+    for (int i = 0; i < length; i++) {
+      if (enableInterning) {
+        _unpaddedBytes[i] = byteInterner.intern(getUnpaddedBytes(i, buffer));
+        _unpaddedStrings[i] = strInterner.intern(new String(_unpaddedBytes[i], UTF_8));
+      } else {
+        _unpaddedBytes[i] = getUnpaddedBytes(i, buffer);
+        _unpaddedStrings[i] = new String(_unpaddedBytes[i], UTF_8);
       }
+
+      _unPaddedStringToIdMap.put(_unpaddedStrings[i], i);
     }
   }
 
@@ -82,21 +79,13 @@ public class OnHeapStringDictionary extends BaseImmutableDictionary {
     return _unPaddedStringToIdMap.getInt(stringValue);
   }
 
-  /**
-   * WARNING: With non-zero padding byte, binary search result might not reflect the real insertion index for the value.
-   * E.g. with padding byte 'b', if unpadded value "aa" is in the dictionary, and stored as "aab", then unpadded value
-   * "a" will be mis-positioned after value "aa"; unpadded value "aab" will return positive value even if value "aab" is
-   * not in the dictionary.
-   * TODO: Clean up the segments with legacy non-zero padding byte, and remove the support for non-zero padding byte
-   */
   @Override
   public int insertionIndexOf(String stringValue) {
     int index = _unPaddedStringToIdMap.getInt(stringValue);
     if (index != Dictionary.NULL_VALUE_INDEX) {
       return index;
     } else {
-      return _paddingByte == 0 ? Arrays.binarySearch(_unpaddedStrings, stringValue)
-          : Arrays.binarySearch(_paddedStrings, padString(stringValue));
+      return Arrays.binarySearch(_unpaddedStrings, stringValue);
     }
   }
 

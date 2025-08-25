@@ -28,15 +28,15 @@ import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
-import org.apache.commons.httpclient.HttpConnectionManager;
-import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
+import org.apache.http.conn.HttpClientConnectionManager;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.common.restlet.resources.SegmentConsumerInfo;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
@@ -74,7 +74,7 @@ public class ConsumingSegmentInfoReaderStatelessTest {
   private static final int EXTENDED_TIMEOUT_FACTOR = 100;
 
   private final Executor _executor = Executors.newFixedThreadPool(1);
-  private final HttpConnectionManager _connectionManager = new MultiThreadedHttpConnectionManager();
+  private final HttpClientConnectionManager _connectionManager = new PoolingHttpClientConnectionManager();
   private PinotHelixResourceManager _helix;
   private final Map<String, FakeConsumingInfoServer> _serverMap = new HashMap<>();
 
@@ -197,11 +197,11 @@ public class ConsumingSegmentInfoReaderStatelessTest {
   private void mockSetup(final String[] servers, final Set<String> consumingSegments)
       throws InvalidConfigException {
     when(_helix.getServerToSegmentsMap(anyString())).thenAnswer(invocationOnMock -> subsetOfServerSegments(servers));
+    when(_helix.getServers(anyString(), anyString())).thenAnswer(
+        invocationOnMock -> new TreeSet<>(Arrays.asList(servers)));
     when(_helix.getDataInstanceAdminEndpoints(ArgumentMatchers.anySet())).thenAnswer(
         invocationOnMock -> serverEndpoints(servers));
     when(_helix.getConsumingSegments(anyString())).thenAnswer(invocationOnMock -> consumingSegments);
-    when(_helix.getServersForSegment(anyString(), anyString())).thenAnswer(
-        invocationOnMock -> new HashSet<>(Arrays.asList(servers)));
   }
 
   private ConsumingSegmentInfoReader.ConsumingSegmentsInfoMap testRunner(final String[] servers,

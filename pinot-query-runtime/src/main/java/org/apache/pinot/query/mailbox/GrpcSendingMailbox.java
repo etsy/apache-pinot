@@ -19,83 +19,132 @@
 package org.apache.pinot.query.mailbox;
 
 import com.google.protobuf.ByteString;
-import io.grpc.ManagedChannel;
+import com.google.protobuf.UnsafeByteOperations;
+import io.grpc.stub.StreamObserver;
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
 import org.apache.pinot.common.datablock.DataBlock;
-import org.apache.pinot.common.datablock.MetadataBlock;
-import org.apache.pinot.common.proto.Mailbox;
+import org.apache.pinot.common.datatable.StatMap;
 import org.apache.pinot.common.proto.Mailbox.MailboxContent;
 import org.apache.pinot.common.proto.PinotMailboxGrpc;
-import org.apache.pinot.query.mailbox.channel.ChannelUtils;
-import org.apache.pinot.query.mailbox.channel.MailboxStatusStreamObserver;
+import org.apache.pinot.query.mailbox.channel.ChannelManager;
+import org.apache.pinot.query.mailbox.channel.MailboxStatusObserver;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
+import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
+import org.apache.pinot.query.runtime.operator.MailboxSendOperator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
- * GRPC implementation of the {@link SendingMailbox}.
+ * gRPC implementation of the {@link SendingMailbox}. The gRPC stream is created on the first call to {@link #send}.
  */
-public class GrpcSendingMailbox implements SendingMailbox<TransferableBlock> {
-  private final GrpcMailboxService _mailboxService;
-  private final String _mailboxId;
-  private final AtomicBoolean _initialized = new AtomicBoolean(false);
-  private final AtomicInteger _totalMsgSent = new AtomicInteger(0);
+public class GrpcSendingMailbox implements SendingMailbox {
+  private static final Logger LOGGER = LoggerFactory.getLogger(GrpcSendingMailbox.class);
 
-  private MailboxStatusStreamObserver _statusStreamObserver;
+  private final String _id;
+  private final ChannelManager _channelManager;
+  private final String _hostname;
+  private final int _port;
+  private final long _deadlineMs;
+  private final StatMap<MailboxSendOperator.StatKey> _statMap;
+  private final MailboxStatusObserver _statusObserver = new MailboxStatusObserver();
 
-  public GrpcSendingMailbox(String mailboxId, GrpcMailboxService mailboxService) {
-    _mailboxService = mailboxService;
-    _mailboxId = mailboxId;
-    _initialized.set(false);
-  }
+  private StreamObserver<MailboxContent> _contentObserver;
 
-  public void init()
-      throws UnsupportedOperationException {
-    ManagedChannel channel = _mailboxService.getChannel(_mailboxId);
-    PinotMailboxGrpc.PinotMailboxStub stub = PinotMailboxGrpc.newStub(channel);
-    _statusStreamObserver = new MailboxStatusStreamObserver();
-    _statusStreamObserver.init(stub.open(_statusStreamObserver));
-    // send a begin-of-stream message.
-    _statusStreamObserver.send(MailboxContent.newBuilder()
-        .setMailboxId(_mailboxId)
-        .putMetadata(ChannelUtils.MAILBOX_METADATA_BEGIN_OF_STREAM_KEY, "true")
-        .build());
-    _initialized.set(true);
+  public GrpcSendingMailbox(String id, ChannelManager channelManager, String hostname, int port, long deadlineMs,
+      StatMap<MailboxSendOperator.StatKey> statMap) {
+    _id = id;
+    _channelManager = channelManager;
+    _hostname = hostname;
+    _port = port;
+    _deadlineMs = deadlineMs;
+    _statMap = statMap;
   }
 
   @Override
   public void send(TransferableBlock block)
-      throws UnsupportedOperationException {
-    if (!_initialized.get()) {
-      // initialization is special
-      init();
+      throws IOException {
+    if (isTerminated() || (isEarlyTerminated() && !block.isEndOfStreamBlock())) {
+      return;
     }
-    MailboxContent data = toMailboxContent(block.getDataBlock());
-    _statusStreamObserver.send(data);
-    _totalMsgSent.incrementAndGet();
+    if (LOGGER.isDebugEnabled()) {
+      LOGGER.debug("==[GRPC SEND]== sending message " + block + " to: " + _id);
+    }
+    if (_contentObserver == null) {
+      _contentObserver = getContentObserver();
+    }
+    _contentObserver.onNext(toMailboxContent(block));
+    if (LOGGER.isDebugEnabled()) {
+      LOGGER.debug("==[GRPC SEND]== message " + block + " sent to: " + _id);
+    }
   }
 
   @Override
   public void complete() {
-    _statusStreamObserver.complete();
+    if (isTerminated()) {
+      LOGGER.debug("Already terminated mailbox: {}", _id);
+      return;
+    }
+    LOGGER.debug("Completing mailbox: {}", _id);
+    _contentObserver.onCompleted();
   }
 
   @Override
-  public String getMailboxId() {
-    return _mailboxId;
+  public void cancel(Throwable t) {
+    if (isTerminated()) {
+      LOGGER.debug("Already terminated mailbox: {}", _id);
+      return;
+    }
+    LOGGER.debug("Cancelling mailbox: {}", _id);
+    if (_contentObserver == null) {
+      _contentObserver = getContentObserver();
+    }
+    try {
+      String msg = t != null ? t.getMessage() : "Unknown";
+      // NOTE: DO NOT use onError() because it will terminate the stream, and receiver might not get the callback
+      _contentObserver.onNext(toMailboxContent(TransferableBlockUtils.getErrorTransferableBlock(
+          new RuntimeException("Cancelled by sender with exception: " + msg, t))));
+      _contentObserver.onCompleted();
+    } catch (Exception e) {
+      // Exception can be thrown if the stream is already closed, so we simply ignore it
+      LOGGER.debug("Caught exception cancelling mailbox: {}", _id, e);
+    }
   }
 
-  private MailboxContent toMailboxContent(DataBlock dataBlock) {
+  @Override
+  public boolean isEarlyTerminated() {
+    return _statusObserver.isEarlyTerminated();
+  }
+
+  @Override
+  public boolean isTerminated() {
+    return _statusObserver.isFinished();
+  }
+
+  private StreamObserver<MailboxContent> getContentObserver() {
+    return PinotMailboxGrpc.newStub(_channelManager.getChannel(_hostname, _port))
+        .withDeadlineAfter(_deadlineMs - System.currentTimeMillis(), TimeUnit.MILLISECONDS).open(_statusObserver);
+  }
+
+  private MailboxContent toMailboxContent(TransferableBlock block)
+      throws IOException {
+    _statMap.merge(MailboxSendOperator.StatKey.RAW_MESSAGES, 1);
+    long start = System.currentTimeMillis();
     try {
-      Mailbox.MailboxContent.Builder builder = Mailbox.MailboxContent.newBuilder().setMailboxId(_mailboxId)
-          .setPayload(ByteString.copyFrom(dataBlock.toBytes()));
-      if (dataBlock instanceof MetadataBlock) {
-        builder.putMetadata(ChannelUtils.MAILBOX_METADATA_END_OF_STREAM_KEY, "true");
+      DataBlock dataBlock = block.getDataBlock();
+      byte[] bytes = dataBlock.toBytes();
+      ByteString byteString = UnsafeByteOperations.unsafeWrap(bytes);
+      if (LOGGER.isDebugEnabled()) {
+        LOGGER.debug("Serialized block: {} to {} bytes", block, bytes.length);
       }
-      return builder.build();
-    } catch (IOException e) {
-      throw new RuntimeException("Error converting to mailbox content", e);
+      _statMap.merge(MailboxSendOperator.StatKey.SERIALIZED_BYTES, bytes.length);
+      return MailboxContent.newBuilder().setMailboxId(_id).setPayload(byteString).build();
+    } catch (Throwable t) {
+      LOGGER.warn("Caught exception while serializing block: {}", block, t);
+      throw t;
+    } finally {
+      _statMap.merge(MailboxSendOperator.StatKey.SERIALIZATION_TIME_MS, System.currentTimeMillis() - start);
     }
   }
 }

@@ -39,18 +39,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
-import org.apache.commons.configuration.Configuration;
-import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.commons.configuration2.Configuration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
+import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.SegmentMetadata;
 import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.V1Constants.MetadataKeys.Segment;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
+import org.apache.pinot.segment.spi.index.IndexService;
+import org.apache.pinot.segment.spi.index.IndexType;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Constants;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
-import org.apache.pinot.segment.spi.store.ColumnIndexType;
 import org.apache.pinot.segment.spi.store.ColumnIndexUtils;
 import org.apache.pinot.segment.spi.store.SegmentDirectoryPaths;
 import org.apache.pinot.segment.spi.utils.SegmentMetadataUtils;
@@ -71,7 +74,7 @@ public class SegmentMetadataImpl implements SegmentMetadata {
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentMetadataImpl.class);
 
   private final File _indexDir;
-  private final Map<String, ColumnMetadata> _columnMetadataMap;
+  private final TreeMap<String, ColumnMetadata> _columnMetadataMap;
   private String _segmentName;
   private final Schema _schema;
   private long _crc = Long.MIN_VALUE;
@@ -100,9 +103,9 @@ public class SegmentMetadataImpl implements SegmentMetadata {
    * For segments that can only provide the inputstream to the metadata
    */
   public SegmentMetadataImpl(InputStream metadataPropertiesInputStream, InputStream creationMetaInputStream)
-      throws IOException {
+      throws IOException, ConfigurationException {
     _indexDir = null;
-    _columnMetadataMap = new HashMap<>();
+    _columnMetadataMap = new TreeMap<>();
     _schema = new Schema();
 
     PropertiesConfiguration segmentMetadataPropertiesConfiguration =
@@ -120,9 +123,9 @@ public class SegmentMetadataImpl implements SegmentMetadata {
    * <p>If segment metadata file exists in multiple segment version, load the one in highest segment version.
    */
   public SegmentMetadataImpl(File indexDir)
-      throws IOException {
+      throws IOException, ConfigurationException {
     _indexDir = indexDir;
-    _columnMetadataMap = new HashMap<>();
+    _columnMetadataMap = new TreeMap<>();
     _schema = new Schema();
 
     PropertiesConfiguration segmentMetadataPropertiesConfiguration =
@@ -197,7 +200,8 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     }
   }
 
-  private void init(PropertiesConfiguration segmentMetadataPropertiesConfiguration) {
+  private void init(PropertiesConfiguration segmentMetadataPropertiesConfiguration)
+      throws ConfigurationException {
     if (segmentMetadataPropertiesConfiguration.containsKey(Segment.SEGMENT_CREATOR_VERSION)) {
       _creatorName = segmentMetadataPropertiesConfiguration.getString(Segment.SEGMENT_CREATOR_VERSION);
     }
@@ -243,8 +247,8 @@ public class SegmentMetadataImpl implements SegmentMetadata {
           try {
             String[] parsedKeys = ColumnIndexUtils.parseIndexMapKeys(key, _indexDir.getPath());
             if (parsedKeys[2].equals(ColumnIndexUtils.MAP_KEY_NAME_SIZE)) {
-              ColumnIndexType columnIndexType = ColumnIndexType.getValue(parsedKeys[1]);
-              _columnMetadataMap.get(parsedKeys[0]).getIndexSizeMap().put(columnIndexType, mapConfig.getLong(key));
+              IndexType<?, ?, ?> indexType = IndexService.getInstance().get(parsedKeys[1]);
+              _columnMetadataMap.get(parsedKeys[0]).getIndexSizeMap().put(indexType, mapConfig.getLong(key));
             }
           } catch (Exception e) {
             LOGGER.debug("Unable to load index metadata in {} for {}!", indexMapFile, key, e);
@@ -384,6 +388,7 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     return Long.MIN_VALUE;
   }
 
+  @Nullable
   @Override
   public List<StarTreeV2Metadata> getStarTreeV2MetadataList() {
     return _starTreeV2MetadataList;
@@ -405,7 +410,7 @@ public class SegmentMetadataImpl implements SegmentMetadata {
   }
 
   @Override
-  public Map<String, ColumnMetadata> getColumnMetadataMap() {
+  public TreeMap<String, ColumnMetadata> getColumnMetadataMap() {
     return _columnMetadataMap;
   }
 

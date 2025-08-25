@@ -35,16 +35,27 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   DELETED_SEGMENT_COUNT("segments", false),
   DELETE_TABLE_FAILURES("tables", false),
   REALTIME_ROWS_CONSUMED("rows", true),
+  REALTIME_ROWS_SANITIZED("rows", true),
+  REALTIME_ROWS_FETCHED("rows", false),
+  REALTIME_ROWS_FILTERED("rows", false),
   INVALID_REALTIME_ROWS_DROPPED("rows", false),
   INCOMPLETE_REALTIME_ROWS_CONSUMED("rows", false),
   REALTIME_CONSUMPTION_EXCEPTIONS("exceptions", true),
+  REALTIME_MERGED_TEXT_IDX_TRUNCATED_DOCUMENT_SIZE("bytes", false),
   REALTIME_OFFSET_COMMITS("commits", true),
   REALTIME_OFFSET_COMMIT_EXCEPTIONS("exceptions", false),
+  STREAM_CONSUMER_CREATE_EXCEPTIONS("exceptions", false),
+  // number of times partition of a record did not match the partition of the stream
   REALTIME_PARTITION_MISMATCH("mismatch", false),
   REALTIME_DEDUP_DROPPED("rows", false),
   UPSERT_KEYS_IN_WRONG_SEGMENT("rows", false),
   PARTIAL_UPSERT_OUT_OF_ORDER("rows", false),
   PARTIAL_UPSERT_KEYS_NOT_REPLACED("rows", false),
+  UPSERT_OUT_OF_ORDER("rows", false),
+  DELETED_KEYS_TTL_PRIMARY_KEYS_REMOVED("rows", false),
+  METADATA_TTL_PRIMARY_KEYS_REMOVED("rows", false),
+  UPSERT_MISSED_VALID_DOC_ID_SNAPSHOT_COUNT("segments", false),
+  UPSERT_PRELOAD_FAILURE("count", false),
   ROWS_WITH_ERRORS("rows", false),
   LLC_CONTROLLER_RESPONSE_NOT_SENT("messages", true),
   LLC_CONTROLLER_RESPONSE_COMMIT("messages", true),
@@ -68,36 +79,100 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   RELOAD_FAILURES("segments", false),
   REFRESH_FAILURES("segments", false),
   UNTAR_FAILURES("segments", false),
-  SEGMENT_STREAMED_DOWNLOAD_UNTAR_FAILURES("segments", false),
+  SEGMENT_STREAMED_DOWNLOAD_UNTAR_FAILURES("segments", false, "Counts the number of segment "
+      + "fetch failures"),
   SEGMENT_DIR_MOVEMENT_FAILURES("segments", false),
   SEGMENT_DOWNLOAD_FAILURES("segments", false),
   SEGMENT_DOWNLOAD_FROM_REMOTE_FAILURES("segments", false),
   SEGMENT_DOWNLOAD_FROM_PEERS_FAILURES("segments", false),
+  SEGMENT_UPLOAD_FAILURE("segments", false),
+  SEGMENT_UPLOAD_SUCCESS("segments", false),
+  // Emitted only by Server to Deep-store segment uploader.
+  SEGMENT_UPLOAD_TIMEOUT("segments", false),
   NUM_RESIZES("numResizes", false),
+  RESIZE_TIME_MS("resizeTimeMs", false),
   NO_TABLE_ACCESS("tables", true),
   INDEXING_FAILURES("attributeValues", true),
 
   READINESS_CHECK_OK_CALLS("readinessCheck", true),
   READINESS_CHECK_BAD_CALLS("readinessCheck", true),
-  QUERIES_PREEMPTED("query", true),
+  QUERIES_KILLED("query", true),
+  HEAP_CRITICAL_LEVEL_EXCEEDED("count", true),
+  HEAP_PANIC_LEVEL_EXCEEDED("count", true),
 
   // Netty connection metrics
   NETTY_CONNECTION_BYTES_RECEIVED("nettyConnection", true),
   NETTY_CONNECTION_RESPONSES_SENT("nettyConnection", true),
   NETTY_CONNECTION_BYTES_SENT("nettyConnection", true),
 
+  // GRPC related metrics
+  GRPC_QUERIES("grpcQueries", true),
+  GRPC_BYTES_RECEIVED("grpcBytesReceived", true),
+  GRPC_BYTES_SENT("grpcBytesSent", true),
+  GRPC_TRANSPORT_READY("grpcTransport", true),
+  GRPC_TRANSPORT_TERMINATED("grpcTransport", true),
+
   NUM_SEGMENTS_PRUNED_INVALID("numSegmentsPrunedInvalid", false),
   NUM_SEGMENTS_PRUNED_BY_LIMIT("numSegmentsPrunedByLimit", false),
-  NUM_SEGMENTS_PRUNED_BY_VALUE("numSegmentsPrunedByValue", false),;
+  NUM_SEGMENTS_PRUNED_BY_VALUE("numSegmentsPrunedByValue", false),
+  LARGE_QUERY_RESPONSES_SENT("largeResponses", false),
+  TOTAL_THREAD_CPU_TIME_MILLIS("millis", false),
+  LARGE_QUERY_RESPONSE_SIZE_EXCEPTIONS("exceptions", false),
+  STREAM_DATA_LOSS("streamDataLoss", false),
+
+  // Multi-stage
+  /**
+   * Number of times the max number of rows in the hash table has been reached.
+   * It is increased at most one by one each time per stage.
+   * That means that if a stage has 10 workers and all of them reach the limit, this will be increased by 1.
+   * But if a single query has 2 different join operators and each one reaches the limit, this will be increased by 2.
+   */
+  HASH_JOIN_TIMES_MAX_ROWS_REACHED("times", true),
+  /**
+   * Number of times the max number of groups has been reached.
+   * It is increased at most one by one each time per stage.
+   * That means that if a stage has 10 workers and all of them reach the limit, this will be increased by 1.
+   * But if a single query has 2 different aggregate operators and each one reaches the limit, this will be increased
+   * by 2.
+   */
+  AGGREGATE_TIMES_NUM_GROUPS_LIMIT_REACHED("times", true),
+  /**
+   * The number of blocks that have been sent to the next stage without being serialized.
+   * This is the sum of all blocks sent by all workers in the stage.
+   */
+  MULTI_STAGE_IN_MEMORY_MESSAGES("messages", true),
+  /**
+   * The number of blocks that have been sent to the next stage in serialized format.
+   * This is the sum of all blocks sent by all workers in the stage.
+   */
+  MULTI_STAGE_RAW_MESSAGES("messages", true),
+  /**
+   * The number of bytes that have been sent to the next stage in serialized format.
+   * This is the sum of all bytes sent by all workers in the stage.
+   */
+  MULTI_STAGE_RAW_BYTES("bytes", true),
+  /**
+   * Number of times the max number of rows in window has been reached.
+   * It is increased at most one by one each time per stage.
+   * That means that if a stage has 10 workers and all of them reach the limit, this will be increased by 1.
+   * But if a single query has 2 different window operators and each one reaches the limit, this will be increased by 2.
+   */
+  WINDOW_TIMES_MAX_ROWS_REACHED("times", true);
 
   private final String _meterName;
   private final String _unit;
   private final boolean _global;
+  private final String _description;
 
   ServerMeter(String unit, boolean global) {
+    this(unit, global, "");
+  }
+
+  ServerMeter(String unit, boolean global, String description) {
     _unit = unit;
     _global = global;
     _meterName = Utils.toCamelCase(name().toLowerCase());
+    _description = description;
   }
 
   @Override
@@ -118,5 +193,10 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   @Override
   public boolean isGlobal() {
     return _global;
+  }
+
+  @Override
+  public String getDescription() {
+    return _description;
   }
 }

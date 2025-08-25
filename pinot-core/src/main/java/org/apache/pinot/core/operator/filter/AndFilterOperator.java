@@ -19,12 +19,17 @@
 package org.apache.pinot.core.operator.filter;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
+import org.apache.pinot.core.common.BlockDocIdSet;
 import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.blocks.FilterBlock;
 import org.apache.pinot.core.operator.docidsets.AndDocIdSet;
-import org.apache.pinot.core.operator.docidsets.FilterBlockDocIdSet;
+import org.apache.pinot.core.operator.docidsets.EmptyDocIdSet;
+import org.apache.pinot.core.operator.docidsets.MatchAllDocIdSet;
+import org.apache.pinot.core.operator.docidsets.NotDocIdSet;
+import org.apache.pinot.core.operator.docidsets.OrDocIdSet;
 import org.apache.pinot.spi.trace.Tracing;
 import org.roaringbitmap.buffer.BufferFastAggregation;
 import org.roaringbitmap.buffer.ImmutableRoaringBitmap;
@@ -36,23 +41,50 @@ public class AndFilterOperator extends BaseFilterOperator {
   private final List<BaseFilterOperator> _filterOperators;
   private final Map<String, String> _queryOptions;
 
-  public AndFilterOperator(List<BaseFilterOperator> filterOperators, Map<String, String> queryOptions) {
+  public AndFilterOperator(List<BaseFilterOperator> filterOperators, @Nullable Map<String, String> queryOptions,
+      int numDocs, boolean nullHandlingEnabled) {
+    super(numDocs, nullHandlingEnabled);
     _filterOperators = filterOperators;
     _queryOptions = queryOptions;
   }
 
-  public AndFilterOperator(List<BaseFilterOperator> filterOperators) {
-    this(filterOperators, null);
+  @Override
+  protected BlockDocIdSet getTrues() {
+    Tracing.activeRecording().setNumChildren(_filterOperators.size());
+    List<BlockDocIdSet> blockDocIdSets = new ArrayList<>(_filterOperators.size());
+    for (BaseFilterOperator filterOperator : _filterOperators) {
+      blockDocIdSets.add(filterOperator.getTrues());
+    }
+    return new AndDocIdSet(blockDocIdSets, _queryOptions);
   }
 
   @Override
-  protected FilterBlock getNextBlock() {
-    Tracing.activeRecording().setNumChildren(_filterOperators.size());
-    List<FilterBlockDocIdSet> filterBlockDocIdSets = new ArrayList<>(_filterOperators.size());
+  protected BlockDocIdSet getFalses() {
+    List<BlockDocIdSet> blockDocIdSets = new ArrayList<>(_filterOperators.size());
     for (BaseFilterOperator filterOperator : _filterOperators) {
-      filterBlockDocIdSets.add(filterOperator.nextBlock().getBlockDocIdSet());
+      BlockDocIdSet trues = filterOperator.getTrues();
+      if (trues instanceof EmptyDocIdSet) {
+        return new MatchAllDocIdSet(_numDocs);
+      }
+      if (trues instanceof MatchAllDocIdSet) {
+        continue;
+      }
+      if (_nullHandlingEnabled) {
+        BlockDocIdSet nulls = filterOperator.getNulls();
+        if (!(nulls instanceof EmptyDocIdSet)) {
+          blockDocIdSets.add(new OrDocIdSet(Arrays.asList(trues, nulls), _numDocs));
+          continue;
+        }
+      }
+      blockDocIdSets.add(trues);
     }
-    return new FilterBlock(new AndDocIdSet(filterBlockDocIdSets, _queryOptions));
+    if (blockDocIdSets.isEmpty()) {
+      return EmptyDocIdSet.getInstance();
+    }
+    if (blockDocIdSets.size() == 1) {
+      return new NotDocIdSet(blockDocIdSets.get(0), _numDocs);
+    }
+    return new NotDocIdSet(new AndDocIdSet(blockDocIdSets, _queryOptions), _numDocs);
   }
 
   @Override
@@ -76,7 +108,6 @@ public class AndFilterOperator extends BaseFilterOperator {
     }
     return BufferFastAggregation.andCardinality(bitmaps);
   }
-
 
   @Override
   public List<Operator> getChildOperators() {

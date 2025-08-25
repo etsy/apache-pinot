@@ -18,8 +18,8 @@
  */
 package org.apache.pinot.spi.stream;
 
-import java.util.Collections;
 import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.pinot.spi.annotations.InterfaceAudience;
 import org.apache.pinot.spi.annotations.InterfaceStability;
 import org.apache.pinot.spi.data.readers.GenericRow;
@@ -34,13 +34,11 @@ import org.apache.pinot.spi.data.readers.GenericRow;
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
 public interface RowMetadata {
-  GenericRow EMPTY_ROW = new GenericRow();
-  Map<String, String> EMPTY_COLLECTION = Collections.emptyMap();
 
   /**
    * Returns the timestamp associated with the record. This typically refers to the time it was ingested into the
-   * upstream source. In some cases, it may be the time at which the record was created, aka event time (eg. in kafka,
-   * a topic may be configured to use record `CreateTime` instead of `LogAppendTime`).
+   * (last) upstream source. In some cases, it may be the time at which the record was created, aka event time
+   * (eg. in kafka, a topic may be configured to use record `CreateTime` instead of `LogAppendTime`).
    *
    * Expected to be used for stream-based sources.
    *
@@ -50,24 +48,48 @@ public interface RowMetadata {
   long getRecordIngestionTimeMs();
 
   /**
-   * Returns the stream message headers
+   * When supported by the underlying stream, this method returns the timestamp in milliseconds associated with
+   * the ingestion of the record in the first stream.
    *
-   * @return A {@link GenericRow} that encapsulates the headers in the ingested row
+   * Complex ingestion pipelines may be composed of multiple streams:
+   * (EventCreation) -> {First Stream} -> ... -> {Last Stream}
+   *
+   * @return timestamp (epoch in milliseconds) when the row was initially ingested upstream for the first
+   *         time Long.MIN_VALUE if not supported by the underlying stream.
    */
-  default GenericRow getHeaders() {
-    EMPTY_ROW.clear();
-    return EMPTY_ROW;
+  default long getFirstStreamRecordIngestionTimeMs() {
+    return Long.MIN_VALUE;
   }
 
   /**
-   * Returns the metadata associated with the stream record
-   *
-   * Kafka's record offset would be an example of a metadata associated with the record. Record metadata is typically
-   * stream specific and hence, it is defined as a Map of strings.
-   *
-   * @return A Map of record metadata entries.
+   * Returns the stream offset of the message.
    */
+  @Nullable
+  default StreamPartitionMsgOffset getOffset() {
+    return null;
+  }
+
+  /**
+   * Returns the next stream offset of the message.
+   */
+  @Nullable
+  default StreamPartitionMsgOffset getNextOffset() {
+    return null;
+  }
+
+  /**
+   * Returns the stream message headers.
+   */
+  @Nullable
+  default GenericRow getHeaders() {
+    return null;
+  }
+
+  /**
+   * Returns the metadata associated with the stream message.
+   */
+  @Nullable
   default Map<String, String> getRecordMetadata() {
-    return EMPTY_COLLECTION;
+    return null;
   }
 }

@@ -95,7 +95,8 @@ public class HelixBrokerStarterTest extends ControllerTest {
     _helixResourceManager.addTable(offlineTableConfig);
     TableConfig realtimeTimeConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName(RAW_TABLE_NAME).setTimeColumnName(TIME_COLUMN_NAME)
-            .setTimeType(TimeUnit.DAYS.name()).setStreamConfigs(getStreamConfigs()).build();
+            .setTimeType(TimeUnit.DAYS.name()).setStreamConfigs(getStreamConfigs()).setNumReplicas(1)
+            .build();
     _helixResourceManager.addTable(realtimeTimeConfig);
 
     for (int i = 0; i < NUM_OFFLINE_SEGMENTS; i++) {
@@ -104,20 +105,26 @@ public class HelixBrokerStarterTest extends ControllerTest {
     }
 
     TestUtils.waitForCondition(aVoid -> {
+      // should wait for both realtime and offline table external view to be live.
       ExternalView offlineTableExternalView =
           _helixAdmin.getResourceExternalView(getHelixClusterName(), OFFLINE_TABLE_NAME);
+      ExternalView realtimeTableExternalView =
+          _helixAdmin.getResourceExternalView(getHelixClusterName(), REALTIME_TABLE_NAME);
       return offlineTableExternalView != null
-          && offlineTableExternalView.getPartitionSet().size() == NUM_OFFLINE_SEGMENTS;
+          && offlineTableExternalView.getPartitionSet().size() == NUM_OFFLINE_SEGMENTS
+          && realtimeTableExternalView != null;
     }, 30_000L, "Failed to find all OFFLINE segments in the ExternalView");
   }
 
   private Map<String, String> getStreamConfigs() {
     Map<String, String> streamConfigs = new HashMap<>();
     streamConfigs.put("streamType", "kafka");
-    streamConfigs.put("stream.kafka.consumer.type", "highLevel");
+    streamConfigs.put("stream.kafka.consumer.type", "lowlevel");
     streamConfigs.put("stream.kafka.topic.name", "kafkaTopic");
     streamConfigs.put("stream.kafka.decoder.class.name",
         "org.apache.pinot.plugin.stream.kafka.KafkaAvroMessageDecoder");
+    streamConfigs.put("stream.kafka.consumer.factory.class.name",
+        "org.apache.pinot.core.realtime.impl.fakestream.FakeStreamConsumerFactory");
     return streamConfigs;
   }
 
@@ -156,7 +163,8 @@ public class HelixBrokerStarterTest extends ControllerTest {
     RoutingTable routingTable = routingManager.getRoutingTable(brokerRequest, 0);
     assertNotNull(routingTable);
     assertEquals(routingTable.getServerInstanceToSegmentsMap().size(), NUM_SERVERS);
-    assertEquals(routingTable.getServerInstanceToSegmentsMap().values().iterator().next().size(), NUM_OFFLINE_SEGMENTS);
+    assertEquals(routingTable.getServerInstanceToSegmentsMap().values().iterator().next().getLeft().size(),
+        NUM_OFFLINE_SEGMENTS);
     assertTrue(routingTable.getUnavailableSegments().isEmpty());
 
     // Add a new segment into the OFFLINE table
@@ -164,9 +172,9 @@ public class HelixBrokerStarterTest extends ControllerTest {
         SegmentMetadataMockUtils.mockSegmentMetadata(RAW_TABLE_NAME), "downloadUrl");
 
     TestUtils.waitForCondition(aVoid ->
-        routingManager.getRoutingTable(brokerRequest, 0).getServerInstanceToSegmentsMap()
-            .values().iterator().next().size() == NUM_OFFLINE_SEGMENTS + 1, 30_000L, "Failed to add the new segment "
-        + "into the routing table");
+            routingManager.getRoutingTable(brokerRequest, 0).getServerInstanceToSegmentsMap().values().iterator().next()
+                .getLeft().size() == NUM_OFFLINE_SEGMENTS + 1, 30_000L,
+        "Failed to add the new segment " + "into the routing table");
 
     // Add a new table with different broker tenant
     String newRawTableName = "newTable";
@@ -181,6 +189,7 @@ public class HelixBrokerStarterTest extends ControllerTest {
     }
 
     // Add a new table with same broker tenant
+    addDummySchema(newRawTableName);
     newTableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(newRawTableName)
         .setServerTenant(TagNameUtils.DEFAULT_TENANT_NAME).build();
     _helixResourceManager.addTable(newTableConfig);

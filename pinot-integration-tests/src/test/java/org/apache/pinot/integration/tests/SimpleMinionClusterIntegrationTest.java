@@ -20,12 +20,16 @@ package org.apache.pinot.integration.tests;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.task.TaskState;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMetrics;
+import org.apache.pinot.common.metrics.MetricValueUtils;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.minion.PinotHelixTaskResourceManager;
 import org.apache.pinot.controller.helix.core.minion.PinotTaskManager;
@@ -78,12 +82,18 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
 
     // Set task timeout in cluster config
     PinotHelixResourceManager helixResourceManager = _controllerStarter.getHelixResourceManager();
+    Map<String, String> properties = new HashMap<>();
+    properties.put(TASK_TYPE + MinionConstants.TIMEOUT_MS_KEY_SUFFIX, Long.toString(600_000L));
+    properties.put(TASK_TYPE + MinionConstants.MAX_ATTEMPTS_PER_TASK_KEY_SUFFIX, "2");
+
     helixResourceManager.getHelixAdmin().setConfig(
-        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER)
-            .forCluster(helixResourceManager.getHelixClusterName()).build(),
-        Collections.singletonMap(TASK_TYPE + MinionConstants.TIMEOUT_MS_KEY_SUFFIX, Long.toString(600_000L)));
+        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(
+            helixResourceManager.getHelixClusterName()).build(), properties);
 
     // Add 3 offline tables, where 2 of them have TestTask enabled
+    addDummySchema(TABLE_NAME_1);
+    addDummySchema(TABLE_NAME_2);
+    addDummySchema(TABLE_NAME_3);
     TableTaskConfig taskConfig = new TableTaskConfig(Collections.singletonMap(TASK_TYPE, Collections.emptyMap()));
     addTableConfig(
         new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME_1).setTaskConfig(taskConfig).build());
@@ -102,6 +112,13 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
     assertEquals(taskGenerator.getTaskTimeoutMs(), 600_000L);
   }
 
+  @Test
+  public void testTaskMaxAttempts() {
+    PinotTaskGenerator taskGenerator = _taskManager.getTaskGeneratorRegistry().getTaskGenerator(TASK_TYPE);
+    assertNotNull(taskGenerator);
+    assertEquals(taskGenerator.getMaxAttemptsPerTask(), 2);
+  }
+
   private void verifyTaskCount(String task, int errors, int waiting, int running, int total) {
     // Wait for at most 10 seconds for Helix to generate the tasks
     TestUtils.waitForCondition((aVoid) -> {
@@ -117,32 +134,33 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
     HOLD.set(true);
     // No tasks before we start.
     assertEquals(_helixTaskResourceManager.getTasksInProgress(TASK_TYPE).size(), 0);
-    verifyTaskCount("Task_" + TASK_TYPE + "_1624403781879", 0, 0, 0, 0);
 
-    // Should create the task queues and generate a task
-    String task1 = _taskManager.scheduleTasks().get(TASK_TYPE);
+    // Should create the task queues and generate a task in the same minion instance
+    List<String> task1 = _taskManager.scheduleAllTasksForAllTables(null).get(TASK_TYPE);
     assertNotNull(task1);
+    assertEquals(task1.size(), 1);
     assertTrue(_helixTaskResourceManager.getTaskQueues()
         .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(TASK_TYPE)));
-    assertTrue(_helixTaskResourceManager.getTasksInProgress(TASK_TYPE).contains(task1));
+    assertTrue(_helixTaskResourceManager.getTasksInProgress(TASK_TYPE).contains(task1.get(0)));
 
     // Since we have two tables, two sub-tasks are generated -- one for each table.
     // The default concurrent sub-tasks per minion instance is 1, and we have one minion
     // instance spun up. So, one sub-tasks gets scheduled in a minion, and the other one
     // waits.
-    verifyTaskCount(task1, 0, 1, 1, 2);
+    verifyTaskCount(task1.get(0), 0, 1, 1, 2);
     // Should generate one more task, with two sub-tasks. Both of these sub-tasks will wait
     // since we have one minion instance that is still running one of the sub-tasks.
-    String task2 = _taskManager.scheduleTask(TASK_TYPE);
+    List<String> task2 = _taskManager.scheduleTaskForAllTables(TASK_TYPE, null);
     assertNotNull(task2);
-    assertTrue(_helixTaskResourceManager.getTasksInProgress(TASK_TYPE).contains(task2));
-    verifyTaskCount(task2, 0, 2, 0, 2);
+    assertEquals(task2.size(), 1);
+    assertTrue(_helixTaskResourceManager.getTasksInProgress(TASK_TYPE).contains(task2.get(0)));
+    verifyTaskCount(task2.get(0), 0, 2, 0, 2);
 
     // Should not generate more tasks since SimpleMinionClusterIntegrationTests.NUM_TASKS is 2.
     // Our test task generator does not generate if there are already this many sub-tasks in the
     // running+waiting count already.
-    assertNull(_taskManager.scheduleTasks().get(TASK_TYPE));
-    assertNull(_taskManager.scheduleTask(TASK_TYPE));
+    assertNull(_taskManager.scheduleAllTasksForAllTables(null).get(TASK_TYPE));
+    assertNull(_taskManager.scheduleTaskForAllTables(TASK_TYPE, null));
 
     // Wait at most 60 seconds for all tasks IN_PROGRESS
     TestUtils.waitForCondition(input -> {
@@ -153,11 +171,11 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
           return false;
         }
       }
-      assertTrue(TASK_START_NOTIFIED.get());
       assertFalse(TASK_SUCCESS_NOTIFIED.get());
       assertFalse(TASK_CANCELLED_NOTIFIED.get());
       assertFalse(TASK_ERROR_NOTIFIED.get());
-      return true;
+      // Task start callback is triggered shortly after the task start execution asynchronously
+      return TASK_START_NOTIFIED.get();
     }, STATE_TRANSITION_TIMEOUT_MS, "Failed to get all tasks IN_PROGRESS");
 
     // Wait at most 30 seconds for ZK callback to update the controller gauges
@@ -165,11 +183,12 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
     String inProgressGauge = TASK_TYPE + "." + TaskState.IN_PROGRESS;
     String stoppedGauge = TASK_TYPE + "." + TaskState.STOPPED;
     String completedGauge = TASK_TYPE + "." + TaskState.COMPLETED;
-    TestUtils.waitForCondition(
-        input -> controllerMetrics.getValueOfTableGauge(inProgressGauge, ControllerGauge.TASK_STATUS) == NUM_TASKS
-            && controllerMetrics.getValueOfTableGauge(stoppedGauge, ControllerGauge.TASK_STATUS) == 0
-            && controllerMetrics.getValueOfTableGauge(completedGauge, ControllerGauge.TASK_STATUS) == 0,
-        ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
+    TestUtils.waitForCondition(input ->
+        MetricValueUtils.getGlobalGaugeValue(controllerMetrics, inProgressGauge, ControllerGauge.TASK_STATUS)
+            == NUM_TASKS
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, stoppedGauge, ControllerGauge.TASK_STATUS) == 0
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, completedGauge, ControllerGauge.TASK_STATUS)
+            == 0, ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
 
     // Stop the task queue
     _helixTaskResourceManager.stopTaskQueue(TASK_TYPE);
@@ -185,22 +204,23 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
       }
       assertTrue(TASK_START_NOTIFIED.get());
       assertFalse(TASK_SUCCESS_NOTIFIED.get());
-      assertTrue(TASK_CANCELLED_NOTIFIED.get());
       assertFalse(TASK_ERROR_NOTIFIED.get());
-      return true;
+      // Task cancelled callback is triggered shortly after the task framework cancels the task asynchronously
+      return TASK_CANCELLED_NOTIFIED.get();
     }, STATE_TRANSITION_TIMEOUT_MS, "Failed to get all tasks STOPPED");
 
     // Wait at most 30 seconds for ZK callback to update the controller gauges
-    TestUtils.waitForCondition(
-        input -> controllerMetrics.getValueOfTableGauge(inProgressGauge, ControllerGauge.TASK_STATUS) == 0
-            && controllerMetrics.getValueOfTableGauge(stoppedGauge, ControllerGauge.TASK_STATUS) == NUM_TASKS
-            && controllerMetrics.getValueOfTableGauge(completedGauge, ControllerGauge.TASK_STATUS) == 0,
-        ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
+    TestUtils.waitForCondition(input ->
+        MetricValueUtils.getGlobalGaugeValue(controllerMetrics, inProgressGauge, ControllerGauge.TASK_STATUS) == 0
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, stoppedGauge, ControllerGauge.TASK_STATUS)
+            == NUM_TASKS
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, completedGauge, ControllerGauge.TASK_STATUS)
+            == 0, ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
 
     // Task deletion requires the task queue to be stopped,
     // so deleting task1 here before resuming the task queue.
-    assertTrue(_helixTaskResourceManager.getTaskStates(TASK_TYPE).containsKey(task1));
-    _helixTaskResourceManager.deleteTask(task1, false);
+    assertTrue(_helixTaskResourceManager.getTaskStates(TASK_TYPE).containsKey(task1.get(0)));
+    _helixTaskResourceManager.deleteTask(task1.get(0), false);
     // Resume the task queue, and let the task complete
     _helixTaskResourceManager.resumeTaskQueue(TASK_TYPE);
     HOLD.set(false);
@@ -214,7 +234,7 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
         }
       }
       // Task deletion happens eventually along with other state transitions.
-      assertFalse(_helixTaskResourceManager.getTaskStates(TASK_TYPE).containsKey(task1));
+      assertFalse(_helixTaskResourceManager.getTaskStates(TASK_TYPE).containsKey(task1.get(0)));
       assertEquals(taskStates.size(), (NUM_TASKS - 1));
       assertTrue(TASK_START_NOTIFIED.get());
       assertTrue(TASK_SUCCESS_NOTIFIED.get());
@@ -224,11 +244,11 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
     }, STATE_TRANSITION_TIMEOUT_MS, "Failed to get all tasks COMPLETED");
 
     // Wait at most 30 seconds for ZK callback to update the controller gauges
-    TestUtils.waitForCondition(
-        input -> controllerMetrics.getValueOfTableGauge(inProgressGauge, ControllerGauge.TASK_STATUS) == 0
-            && controllerMetrics.getValueOfTableGauge(stoppedGauge, ControllerGauge.TASK_STATUS) == 0
-            && controllerMetrics.getValueOfTableGauge(completedGauge, ControllerGauge.TASK_STATUS) == (NUM_TASKS - 1),
-        ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
+    TestUtils.waitForCondition(input ->
+        MetricValueUtils.getGlobalGaugeValue(controllerMetrics, inProgressGauge, ControllerGauge.TASK_STATUS) == 0
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, stoppedGauge, ControllerGauge.TASK_STATUS) == 0
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, completedGauge, ControllerGauge.TASK_STATUS) == (
+            NUM_TASKS - 1), ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
 
     // Delete the task queue
     _helixTaskResourceManager.deleteTaskQueue(TASK_TYPE, false);
@@ -238,11 +258,11 @@ public class SimpleMinionClusterIntegrationTest extends ClusterTest {
         STATE_TRANSITION_TIMEOUT_MS, "Failed to delete the task queue");
 
     // Wait at most 30 seconds for ZK callback to update the controller gauges
-    TestUtils.waitForCondition(
-        input -> controllerMetrics.getValueOfTableGauge(inProgressGauge, ControllerGauge.TASK_STATUS) == 0
-            && controllerMetrics.getValueOfTableGauge(stoppedGauge, ControllerGauge.TASK_STATUS) == 0
-            && controllerMetrics.getValueOfTableGauge(completedGauge, ControllerGauge.TASK_STATUS) == 0,
-        ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
+    TestUtils.waitForCondition(input ->
+        MetricValueUtils.getGlobalGaugeValue(controllerMetrics, inProgressGauge, ControllerGauge.TASK_STATUS) == 0
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, stoppedGauge, ControllerGauge.TASK_STATUS) == 0
+            && MetricValueUtils.getGlobalGaugeValue(controllerMetrics, completedGauge, ControllerGauge.TASK_STATUS)
+            == 0, ZK_CALLBACK_TIMEOUT_MS, "Failed to update the controller gauges");
   }
 
   @AfterClass

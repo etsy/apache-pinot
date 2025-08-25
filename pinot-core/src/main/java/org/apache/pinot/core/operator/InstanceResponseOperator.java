@@ -20,30 +20,38 @@ package org.apache.pinot.core.operator;
 
 import java.util.Collections;
 import java.util.List;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.common.datatable.DataTable.MetadataKey;
 import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.blocks.InstanceResponseBlock;
 import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
+import org.apache.pinot.core.operator.blocks.results.ExceptionResultsBlock;
 import org.apache.pinot.core.operator.combine.BaseCombineOperator;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.FetchContext;
-import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.spi.accounting.ThreadResourceUsageProvider;
+import org.apache.pinot.spi.exception.EarlyTerminationException;
+import org.apache.pinot.spi.exception.QueryCancelledException;
+import org.apache.pinot.spi.trace.Tracing;
 
 
 public class InstanceResponseOperator extends BaseOperator<InstanceResponseBlock> {
   private static final String EXPLAIN_NAME = "INSTANCE_RESPONSE";
 
-  private final BaseCombineOperator<?> _combineOperator;
-  private final List<IndexSegment> _indexSegments;
-  private final List<FetchContext> _fetchContexts;
-  private final int _fetchContextSize;
-  private final QueryContext _queryContext;
+  protected final BaseCombineOperator<?> _combineOperator;
+  protected final List<SegmentContext> _segmentContexts;
+  protected final List<FetchContext> _fetchContexts;
+  protected final int _fetchContextSize;
+  protected final QueryContext _queryContext;
 
-  public InstanceResponseOperator(BaseCombineOperator<?> combineOperator, List<IndexSegment> indexSegments,
+  protected long _threadCpuTimeNs;
+  protected long _systemActivitiesCpuTimeNs;
+
+  public InstanceResponseOperator(BaseCombineOperator<?> combineOperator, List<SegmentContext> segmentContexts,
       List<FetchContext> fetchContexts, QueryContext queryContext) {
     _combineOperator = combineOperator;
-    _indexSegments = indexSegments;
+    _segmentContexts = segmentContexts;
     _fetchContexts = fetchContexts;
     _fetchContextSize = fetchContexts.size();
     _queryContext = queryContext;
@@ -76,12 +84,24 @@ public class InstanceResponseOperator extends BaseOperator<InstanceResponseBlock
 
   @Override
   protected InstanceResponseBlock getNextBlock() {
+    BaseResultsBlock baseResultsBlock = getBaseBlock();
+    return buildInstanceResponseBlock(baseResultsBlock);
+  }
+
+  protected InstanceResponseBlock buildInstanceResponseBlock(BaseResultsBlock baseResultsBlock) {
+    InstanceResponseBlock instanceResponseBlock = new InstanceResponseBlock(baseResultsBlock);
+    instanceResponseBlock.addMetadata(MetadataKey.THREAD_CPU_TIME_NS.getName(), String.valueOf(_threadCpuTimeNs));
+    instanceResponseBlock.addMetadata(MetadataKey.SYSTEM_ACTIVITIES_CPU_TIME_NS.getName(),
+        String.valueOf(_systemActivitiesCpuTimeNs));
+    return instanceResponseBlock;
+  }
+
+  protected BaseResultsBlock getBaseBlock() {
     if (ThreadResourceUsageProvider.isThreadCpuTimeMeasurementEnabled()) {
       long startWallClockTimeNs = System.nanoTime();
 
       ThreadResourceUsageProvider mainThreadResourceUsageProvider = new ThreadResourceUsageProvider();
       BaseResultsBlock resultsBlock = getCombinedResults();
-      InstanceResponseBlock instanceResponseBlock = new InstanceResponseBlock(resultsBlock, _queryContext);
       long mainThreadCpuTimeNs = mainThreadResourceUsageProvider.getThreadTimeNs();
 
       long totalWallClockTimeNs = System.nanoTime() - startWallClockTimeNs;
@@ -92,39 +112,39 @@ public class InstanceResponseOperator extends BaseOperator<InstanceResponseBlock
        */
       long multipleThreadCpuTimeNs = resultsBlock.getExecutionThreadCpuTimeNs();
       int numServerThreads = resultsBlock.getNumServerThreads();
-      long systemActivitiesCpuTimeNs =
-          calSystemActivitiesCpuTimeNs(totalWallClockTimeNs, multipleThreadCpuTimeNs, mainThreadCpuTimeNs,
-              numServerThreads);
+      _systemActivitiesCpuTimeNs = calSystemActivitiesCpuTimeNs(totalWallClockTimeNs, multipleThreadCpuTimeNs,
+          mainThreadCpuTimeNs, numServerThreads);
+      _threadCpuTimeNs = mainThreadCpuTimeNs + multipleThreadCpuTimeNs;
 
-      long threadCpuTimeNs = mainThreadCpuTimeNs + multipleThreadCpuTimeNs;
-      instanceResponseBlock.addMetadata(MetadataKey.THREAD_CPU_TIME_NS.getName(), String.valueOf(threadCpuTimeNs));
-      instanceResponseBlock.addMetadata(MetadataKey.SYSTEM_ACTIVITIES_CPU_TIME_NS.getName(),
-          String.valueOf(systemActivitiesCpuTimeNs));
-
-      return instanceResponseBlock;
+      return resultsBlock;
     } else {
-      return new InstanceResponseBlock(getCombinedResults(), _queryContext);
+      return getCombinedResults();
     }
   }
 
-  private BaseResultsBlock getCombinedResults() {
+  protected BaseResultsBlock getCombinedResults() {
     try {
       prefetchAll();
       return _combineOperator.nextBlock();
+    } catch (EarlyTerminationException e) {
+      Exception killedErrorMsg = Tracing.getThreadAccountant().getErrorStatus();
+      return new ExceptionResultsBlock(new QueryCancelledException(
+          "Cancelled while combining results" + (killedErrorMsg == null ? StringUtils.EMPTY : " " + killedErrorMsg),
+          e));
     } finally {
       releaseAll();
     }
   }
 
-  private void prefetchAll() {
+  public void prefetchAll() {
     for (int i = 0; i < _fetchContextSize; i++) {
-      _indexSegments.get(i).prefetch(_fetchContexts.get(i));
+      _segmentContexts.get(i).getIndexSegment().prefetch(_fetchContexts.get(i));
     }
   }
 
-  private void releaseAll() {
+  public void releaseAll() {
     for (int i = 0; i < _fetchContextSize; i++) {
-      _indexSegments.get(i).release(_fetchContexts.get(i));
+      _segmentContexts.get(i).getIndexSegment().release(_fetchContexts.get(i));
     }
   }
 

@@ -18,12 +18,9 @@
  */
 package org.apache.pinot.plugin.stream.kinesis;
 
-import java.util.Set;
 import org.apache.pinot.spi.stream.PartitionGroupConsumer;
 import org.apache.pinot.spi.stream.PartitionGroupConsumptionStatus;
-import org.apache.pinot.spi.stream.PartitionLevelConsumer;
 import org.apache.pinot.spi.stream.StreamConsumerFactory;
-import org.apache.pinot.spi.stream.StreamLevelConsumer;
 import org.apache.pinot.spi.stream.StreamMetadataProvider;
 import org.apache.pinot.spi.stream.StreamPartitionMsgOffsetFactory;
 
@@ -32,17 +29,6 @@ import org.apache.pinot.spi.stream.StreamPartitionMsgOffsetFactory;
  * {@link StreamConsumerFactory} implementation for the Kinesis stream
  */
 public class KinesisConsumerFactory extends StreamConsumerFactory {
-
-  @Override
-  public PartitionLevelConsumer createPartitionLevelConsumer(String clientId, int partition) {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public StreamLevelConsumer createStreamLevelConsumer(String clientId, String tableName, Set<String> fieldsToRead,
-      String groupId) {
-    throw new UnsupportedOperationException();
-  }
 
   @Override
   public StreamMetadataProvider createPartitionMetadataProvider(String clientId, int partition) {

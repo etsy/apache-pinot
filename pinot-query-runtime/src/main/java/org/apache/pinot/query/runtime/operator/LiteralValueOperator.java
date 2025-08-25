@@ -20,36 +20,52 @@ package org.apache.pinot.query.runtime.operator;
 
 import java.util.ArrayList;
 import java.util.List;
-import javax.annotation.Nullable;
 import org.apache.pinot.common.datablock.DataBlock;
+import org.apache.pinot.common.datatable.StatMap;
 import org.apache.pinot.common.utils.DataSchema;
-import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.BaseOperator;
 import org.apache.pinot.query.planner.logical.RexExpression;
+import org.apache.pinot.query.planner.plannode.ValueNode;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
+import org.apache.pinot.query.runtime.plan.MultiStageQueryStats;
+import org.apache.pinot.query.runtime.plan.OpChainExecutionContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
-public class LiteralValueOperator extends BaseOperator<TransferableBlock> {
+public class LiteralValueOperator extends MultiStageOperator {
   private static final String EXPLAIN_NAME = "LITERAL_VALUE_PROVIDER";
+  private static final Logger LOGGER = LoggerFactory.getLogger(LiteralValueOperator.class);
 
   private final DataSchema _dataSchema;
   private final TransferableBlock _rexLiteralBlock;
   private boolean _isLiteralBlockReturned;
+  private final StatMap<StatKey> _statMap = new StatMap<>(StatKey.class);
 
-  public LiteralValueOperator(DataSchema dataSchema, List<List<RexExpression>> rexLiteralRows) {
-    _dataSchema = dataSchema;
-    _rexLiteralBlock = constructBlock(rexLiteralRows);
-    _isLiteralBlockReturned = false;
+  public LiteralValueOperator(OpChainExecutionContext context, ValueNode node) {
+    super(context);
+    _dataSchema = node.getDataSchema();
+    _rexLiteralBlock = constructBlock(node.getLiteralRows());
+    // only return a single literal block when it is the 1st virtual server. otherwise, result will be duplicated.
+    _isLiteralBlockReturned = context.getId().getVirtualServerId() != 0;
   }
 
   @Override
-  public List<Operator> getChildOperators() {
-    // WorkerExecutor doesn't use getChildOperators, returns null here.
-    return null;
+  public void registerExecution(long time, int numRows) {
+    _statMap.merge(StatKey.EXECUTION_TIME_MS, time);
+    _statMap.merge(StatKey.EMITTED_ROWS, numRows);
   }
 
-  @Nullable
+  @Override
+  protected Logger logger() {
+    return LOGGER;
+  }
+
+  @Override
+  public List<MultiStageOperator> getChildOperators() {
+    return List.of();
+  }
+
   @Override
   public String toExplainString() {
     return EXPLAIN_NAME;
@@ -57,23 +73,51 @@ public class LiteralValueOperator extends BaseOperator<TransferableBlock> {
 
   @Override
   protected TransferableBlock getNextBlock() {
-    if (!_isLiteralBlockReturned) {
+    if (!_isLiteralBlockReturned && !_isEarlyTerminated) {
       _isLiteralBlockReturned = true;
       return _rexLiteralBlock;
     } else {
-      return TransferableBlockUtils.getEndOfStreamTransferableBlock();
+      return createEosBlock();
     }
   }
 
-  private TransferableBlock constructBlock(List<List<RexExpression>> rexLiteralRows) {
+  protected TransferableBlock createEosBlock() {
+    return TransferableBlockUtils.getEndOfStreamTransferableBlock(
+        MultiStageQueryStats.createLiteral(_context.getStageId(), _statMap));
+  }
+
+  @Override
+  public Type getOperatorType() {
+    return Type.LITERAL;
+  }
+
+  private TransferableBlock constructBlock(List<List<RexExpression.Literal>> literalRows) {
     List<Object[]> blockContent = new ArrayList<>();
-    for (List<RexExpression> rexLiteralRow : rexLiteralRows) {
-      Object[] row = new Object[_dataSchema.size()];
+    for (List<RexExpression.Literal> row : literalRows) {
+      Object[] values = new Object[_dataSchema.size()];
       for (int i = 0; i < _dataSchema.size(); i++) {
-        row[i] = ((RexExpression.Literal) rexLiteralRow.get(i)).getValue();
+        values[i] = row.get(i).getValue();
       }
-      blockContent.add(row);
+      blockContent.add(values);
     }
     return new TransferableBlock(blockContent, _dataSchema, DataBlock.Type.ROW);
+  }
+
+  public enum StatKey implements StatMap.Key {
+    //@formatter:off
+    EXECUTION_TIME_MS(StatMap.Type.LONG),
+    EMITTED_ROWS(StatMap.Type.LONG);
+    //@formatter:on
+
+    private final StatMap.Type _type;
+
+    StatKey(StatMap.Type type) {
+      _type = type;
+    }
+
+    @Override
+    public StatMap.Type getType() {
+      return _type;
+    }
   }
 }

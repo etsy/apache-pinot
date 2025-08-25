@@ -22,16 +22,18 @@ import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.stream.Collectors;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.BaseOperator;
+import org.apache.pinot.core.operator.BaseProjectOperator;
 import org.apache.pinot.core.operator.ExecutionStatistics;
-import org.apache.pinot.core.operator.blocks.TransformBlock;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.blocks.results.AggregationResultsBlock;
-import org.apache.pinot.core.operator.transform.TransformOperator;
 import org.apache.pinot.core.query.aggregation.AggregationExecutor;
 import org.apache.pinot.core.query.aggregation.DefaultAggregationExecutor;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils.AggregationInfo;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.startree.executor.StarTreeAggregationExecutor;
 
 
 /**
@@ -44,20 +46,20 @@ import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 public class FilteredAggregationOperator extends BaseOperator<AggregationResultsBlock> {
   private static final String EXPLAIN_NAME = "AGGREGATE_FILTERED";
 
+  private final QueryContext _queryContext;
   private final AggregationFunction[] _aggregationFunctions;
-  private final List<Pair<AggregationFunction[], TransformOperator>> _aggFunctionsWithTransformOperator;
+  private final List<AggregationInfo> _aggregationInfos;
   private final long _numTotalDocs;
 
   private long _numDocsScanned;
   private long _numEntriesScannedInFilter;
   private long _numEntriesScannedPostFilter;
 
-  // We can potentially do away with aggregationFunctions parameter, but its cleaner to pass it in than to construct
-  // it from aggFunctionsWithTransformOperator
-  public FilteredAggregationOperator(AggregationFunction[] aggregationFunctions,
-      List<Pair<AggregationFunction[], TransformOperator>> aggFunctionsWithTransformOperator, long numTotalDocs) {
-    _aggregationFunctions = aggregationFunctions;
-    _aggFunctionsWithTransformOperator = aggFunctionsWithTransformOperator;
+  public FilteredAggregationOperator(QueryContext queryContext, List<AggregationInfo> aggregationInfos,
+      long numTotalDocs) {
+    _queryContext = queryContext;
+    _aggregationFunctions = queryContext.getAggregationFunctions();
+    _aggregationInfos = aggregationInfos;
     _numTotalDocs = numTotalDocs;
   }
 
@@ -70,15 +72,21 @@ public class FilteredAggregationOperator extends BaseOperator<AggregationResults
       resultIndexMap.put(_aggregationFunctions[i], i);
     }
 
-    for (Pair<AggregationFunction[], TransformOperator> filteredAggregation : _aggFunctionsWithTransformOperator) {
-      AggregationFunction[] aggregationFunctions = filteredAggregation.getLeft();
-      AggregationExecutor aggregationExecutor = new DefaultAggregationExecutor(aggregationFunctions);
-      TransformOperator transformOperator = filteredAggregation.getRight();
-      TransformBlock transformBlock;
+    for (AggregationInfo aggregationInfo : _aggregationInfos) {
+      AggregationFunction[] aggregationFunctions = aggregationInfo.getFunctions();
+      BaseProjectOperator<?> projectOperator = aggregationInfo.getProjectOperator();
+      AggregationExecutor aggregationExecutor;
+      if (aggregationInfo.isUseStarTree()) {
+        aggregationExecutor = new StarTreeAggregationExecutor(aggregationFunctions);
+      } else {
+        aggregationExecutor = new DefaultAggregationExecutor(aggregationFunctions);
+      }
+
+      ValueBlock valueBlock;
       int numDocsScanned = 0;
-      while ((transformBlock = transformOperator.nextBlock()) != null) {
-        aggregationExecutor.aggregate(transformBlock);
-        numDocsScanned += transformBlock.getNumDocs();
+      while ((valueBlock = projectOperator.nextBlock()) != null) {
+        aggregationExecutor.aggregate(valueBlock);
+        numDocsScanned += valueBlock.getNumDocs();
       }
       List<Object> filteredResult = aggregationExecutor.getResult();
 
@@ -86,15 +94,15 @@ public class FilteredAggregationOperator extends BaseOperator<AggregationResults
         result[resultIndexMap.get(aggregationFunctions[i])] = filteredResult.get(i);
       }
       _numDocsScanned += numDocsScanned;
-      _numEntriesScannedInFilter += transformOperator.getExecutionStatistics().getNumEntriesScannedInFilter();
-      _numEntriesScannedPostFilter += (long) numDocsScanned * transformOperator.getNumColumnsProjected();
+      _numEntriesScannedInFilter += projectOperator.getExecutionStatistics().getNumEntriesScannedInFilter();
+      _numEntriesScannedPostFilter += (long) numDocsScanned * projectOperator.getNumColumnsProjected();
     }
-    return new AggregationResultsBlock(_aggregationFunctions, Arrays.asList(result));
+    return new AggregationResultsBlock(_aggregationFunctions, Arrays.asList(result), _queryContext);
   }
 
   @Override
   public List<Operator> getChildOperators() {
-    return _aggFunctionsWithTransformOperator.stream().map(Pair::getRight).collect(Collectors.toList());
+    return _aggregationInfos.stream().map(AggregationInfo::getProjectOperator).collect(Collectors.toList());
   }
 
   @Override

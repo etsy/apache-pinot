@@ -57,9 +57,9 @@ public class SumPrecisionAggregationFunction extends BaseSingleInputAggregationF
     int numArguments = arguments.size();
     Preconditions.checkArgument(numArguments <= 3, "SumPrecision expects at most 3 arguments, got: %s", numArguments);
     if (numArguments > 1) {
-      _precision = Integer.valueOf(arguments.get(1).getLiteralString());
+      _precision = arguments.get(1).getLiteral().getIntValue();
       if (numArguments > 2) {
-        _scale = Integer.valueOf(arguments.get(2).getLiteralString());
+        _scale = arguments.get(2).getLiteral().getIntValue();
       } else {
         _scale = null;
       }
@@ -487,6 +487,11 @@ public class SumPrecisionAggregationFunction extends BaseSingleInputAggregationF
     }
     BigDecimal result = intermediateResult.round(new MathContext(_precision, RoundingMode.HALF_EVEN));
     return _scale == null ? result : result.setScale(_scale, RoundingMode.HALF_EVEN);
+  }
+
+  @Override
+  public BigDecimal mergeFinalResult(BigDecimal finalResult1, BigDecimal finalResult2) {
+    return merge(finalResult1, finalResult2);
   }
 
   public BigDecimal getDefaultResult(AggregationResultHolder aggregationResultHolder) {

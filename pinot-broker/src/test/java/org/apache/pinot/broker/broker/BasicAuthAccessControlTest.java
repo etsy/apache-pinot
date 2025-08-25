@@ -21,11 +21,15 @@ package org.apache.pinot.broker.broker;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import javax.ws.rs.WebApplicationException;
 import org.apache.pinot.broker.api.AccessControl;
 import org.apache.pinot.broker.api.HttpRequesterIdentity;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.QuerySource;
+import org.apache.pinot.spi.auth.AuthorizationResult;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
@@ -40,13 +44,20 @@ public class BasicAuthAccessControlTest {
 
   private AccessControl _accessControl;
 
+  Set<String> _tableNames;
+
   @BeforeClass
   public void setup() {
     Map<String, Object> config = new HashMap<>();
     config.put("principals", "admin,user");
     config.put("principals.admin.password", "verysecret");
     config.put("principals.user.password", "secret");
-    config.put("principals.user.tables", "lessImportantStuff");
+    config.put("principals.user.tables", "lessImportantStuff,lesserImportantStuff,leastImportantStuff");
+
+    _tableNames = new HashSet<>();
+    _tableNames.add("lessImportantStuff");
+    _tableNames.add("lesserImportantStuff");
+    _tableNames.add("leastImportantStuff");
 
     AccessControlFactory factory = new BasicAuthAccessControlFactory();
     factory.init(new PinotConfiguration(config));
@@ -56,7 +67,7 @@ public class BasicAuthAccessControlTest {
 
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testNullEntity() {
-    _accessControl.hasAccess(null, null);
+    _accessControl.authorize(null, (BrokerRequest) null);
   }
 
   @Test
@@ -66,7 +77,11 @@ public class BasicAuthAccessControlTest {
     HttpRequesterIdentity identity = new HttpRequesterIdentity();
     identity.setHttpHeaders(headers);
 
-    Assert.assertFalse(_accessControl.hasAccess(identity, null));
+    try {
+      _accessControl.authorize(identity, (BrokerRequest) null);
+    } catch (WebApplicationException e) {
+      Assert.assertEquals(e.getResponse().getStatus(), 401, "must return 401");
+    }
   }
 
   @Test
@@ -83,7 +98,8 @@ public class BasicAuthAccessControlTest {
     BrokerRequest request = new BrokerRequest();
     request.setQuerySource(source);
 
-    Assert.assertTrue(_accessControl.hasAccess(identity, request));
+    Assert.assertTrue(_accessControl.authorize(identity, request).hasAccess());
+    Assert.assertTrue(_accessControl.authorize(identity, _tableNames).hasAccess());
   }
 
   @Test
@@ -99,8 +115,27 @@ public class BasicAuthAccessControlTest {
 
     BrokerRequest request = new BrokerRequest();
     request.setQuerySource(source);
+    AuthorizationResult authorizationResult = _accessControl.authorize(identity, request);
+    Assert.assertFalse(authorizationResult.hasAccess());
+    Assert.assertEquals(authorizationResult.getFailureMessage(),
+        "Authorization Failed for tables: [veryImportantStuff]");
 
-    Assert.assertFalse(_accessControl.hasAccess(identity, request));
+    Set<String> tableNames = new HashSet<>();
+    tableNames.add("veryImportantStuff");
+    authorizationResult = _accessControl.authorize(identity, tableNames);
+    Assert.assertFalse(authorizationResult.hasAccess());
+    Assert.assertEquals(authorizationResult.getFailureMessage(),
+        "Authorization Failed for tables: [veryImportantStuff]");
+    tableNames.add("lessImportantStuff");
+    authorizationResult = _accessControl.authorize(identity, tableNames);
+    Assert.assertFalse(authorizationResult.hasAccess());
+    Assert.assertEquals(authorizationResult.getFailureMessage(),
+        "Authorization Failed for tables: [veryImportantStuff]");
+    tableNames.add("lesserImportantStuff");
+    authorizationResult = _accessControl.authorize(identity, tableNames);
+    Assert.assertFalse(authorizationResult.hasAccess());
+    Assert.assertEquals(authorizationResult.getFailureMessage(),
+        "Authorization Failed for tables: [veryImportantStuff]");
   }
 
   @Test
@@ -116,8 +151,18 @@ public class BasicAuthAccessControlTest {
 
     BrokerRequest request = new BrokerRequest();
     request.setQuerySource(source);
+    AuthorizationResult authorizationResult = _accessControl.authorize(identity, request);
+    Assert.assertTrue(authorizationResult.hasAccess());
+    Assert.assertEquals(authorizationResult.getFailureMessage(), "");
 
-    Assert.assertTrue(_accessControl.hasAccess(identity, request));
+    Set<String> tableNames = new HashSet<>();
+    tableNames.add("lessImportantStuff");
+    tableNames.add("veryImportantStuff");
+    tableNames.add("lesserImportantStuff");
+
+    authorizationResult = _accessControl.authorize(identity, tableNames);
+    Assert.assertTrue(authorizationResult.hasAccess());
+    Assert.assertEquals(authorizationResult.getFailureMessage(), "");
   }
 
   @Test
@@ -129,8 +174,12 @@ public class BasicAuthAccessControlTest {
     identity.setHttpHeaders(headers);
 
     BrokerRequest request = new BrokerRequest();
+    AuthorizationResult authorizationResult = _accessControl.authorize(identity, request);
+    Assert.assertTrue(authorizationResult.hasAccess());
 
-    Assert.assertTrue(_accessControl.hasAccess(identity, request));
+    Set<String> tableNames = new HashSet<>();
+    authorizationResult = _accessControl.authorize(identity, tableNames);
+    Assert.assertTrue(authorizationResult.hasAccess());
   }
 
   @Test
@@ -147,6 +196,7 @@ public class BasicAuthAccessControlTest {
     BrokerRequest request = new BrokerRequest();
     request.setQuerySource(source);
 
-    Assert.assertTrue(_accessControl.hasAccess(identity, request));
+    Assert.assertTrue(_accessControl.authorize(identity, request).hasAccess());
+    Assert.assertTrue(_accessControl.authorize(identity, _tableNames).hasAccess());
   }
 }

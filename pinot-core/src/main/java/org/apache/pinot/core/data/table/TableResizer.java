@@ -28,9 +28,12 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.common.request.context.FilterContext;
 import org.apache.pinot.common.request.context.FunctionContext;
 import org.apache.pinot.common.request.context.OrderByExpressionContext;
+import org.apache.pinot.common.request.context.RequestContextUtils;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
@@ -47,16 +50,22 @@ import org.apache.pinot.spi.utils.ByteArray;
 @SuppressWarnings({"rawtypes", "unchecked"})
 public class TableResizer {
   private final DataSchema _dataSchema;
+  private final boolean _hasFinalInput;
   private final int _numGroupByExpressions;
   private final Map<ExpressionContext, Integer> _groupByExpressionIndexMap;
   private final AggregationFunction[] _aggregationFunctions;
-  private final Map<FunctionContext, Integer> _aggregationFunctionIndexMap;
+  private final Map<Pair<FunctionContext, FilterContext>, Integer> _filteredAggregationIndexMap;
   private final int _numOrderByExpressions;
   private final OrderByValueExtractor[] _orderByValueExtractors;
   private final Comparator<IntermediateRecord> _intermediateRecordComparator;
 
   public TableResizer(DataSchema dataSchema, QueryContext queryContext) {
+    this(dataSchema, false, queryContext);
+  }
+
+  public TableResizer(DataSchema dataSchema, boolean hasFinalInput, QueryContext queryContext) {
     _dataSchema = dataSchema;
+    _hasFinalInput = hasFinalInput;
 
     // NOTE: The data schema will always have group-by expressions in the front, followed by aggregation functions of
     //       the same order as in the query context. This is handled in AggregationGroupByOrderByOperator.
@@ -71,18 +80,20 @@ public class TableResizer {
 
     _aggregationFunctions = queryContext.getAggregationFunctions();
     assert _aggregationFunctions != null;
-    _aggregationFunctionIndexMap = queryContext.getAggregationFunctionIndexMap();
-    assert _aggregationFunctionIndexMap != null;
+    _filteredAggregationIndexMap = queryContext.getFilteredAggregationsIndexMap();
+    assert _filteredAggregationIndexMap != null;
 
     List<OrderByExpressionContext> orderByExpressions = queryContext.getOrderByExpressions();
     assert orderByExpressions != null;
     _numOrderByExpressions = orderByExpressions.size();
     _orderByValueExtractors = new OrderByValueExtractor[_numOrderByExpressions];
     Comparator[] comparators = new Comparator[_numOrderByExpressions];
+    int[] nullComparisonResults = new int[_numOrderByExpressions];
     for (int i = 0; i < _numOrderByExpressions; i++) {
       OrderByExpressionContext orderByExpression = orderByExpressions.get(i);
       _orderByValueExtractors[i] = getOrderByValueExtractor(orderByExpression.getExpression());
       comparators[i] = orderByExpression.isAsc() ? Comparator.naturalOrder() : Comparator.reverseOrder();
+      nullComparisonResults[i] = orderByExpression.isNullsLast() ? -1 : 1;
     }
     boolean nullHandlingEnabled = queryContext.isNullHandlingEnabled();
     if (nullHandlingEnabled) {
@@ -94,10 +105,9 @@ public class TableResizer {
             if (v2 == null) {
               continue;
             }
-            // The default null ordering is NULLS LAST, regardless of the ordering direction.
-            return 1;
+            return -nullComparisonResults[i];
           } else if (v2 == null) {
-            return -1;
+            return nullComparisonResults[i];
           }
           int result = comparators[i].compare(v1, v2);
           if (result != 0) {
@@ -124,7 +134,7 @@ public class TableResizer {
    */
   private OrderByValueExtractor getOrderByValueExtractor(ExpressionContext expression) {
     if (expression.getType() == ExpressionContext.Type.LITERAL) {
-      return new LiteralExtractor(expression.getLiteralString());
+      return new LiteralExtractor(expression.getLiteral().getStringValue());
     }
     Integer groupByExpressionIndex = _groupByExpressionIndexMap.get(expression);
     if (groupByExpressionIndex != null) {
@@ -134,13 +144,26 @@ public class TableResizer {
     FunctionContext function = expression.getFunction();
     Preconditions.checkState(function != null, "Failed to find ORDER-BY expression: %s in the GROUP-BY clause",
         expression);
+    FunctionContext aggregation;
+    FilterContext filter;
     if (function.getType() == FunctionContext.Type.AGGREGATION) {
       // Aggregation function
-      return new AggregationFunctionExtractor(_aggregationFunctionIndexMap.get(function));
+      aggregation = function;
+      filter = null;
+    } else if (function.getType() == FunctionContext.Type.TRANSFORM && "FILTER".equalsIgnoreCase(
+        function.getFunctionName())) {
+      // Filtered aggregation
+      aggregation = function.getArguments().get(0).getFunction();
+      filter = RequestContextUtils.getFilter(function.getArguments().get(1));
     } else {
       // Post-aggregation function
       return new PostAggregationFunctionExtractor(function);
     }
+
+    int index = _filteredAggregationIndexMap.get(Pair.of(aggregation, filter));
+    // For final aggregate result, we can handle it the same way as group key
+    return _hasFinalInput ? new GroupByExpressionExtractor(_numGroupByExpressions + index)
+        : new AggregationFunctionExtractor(index);
   }
 
   /**

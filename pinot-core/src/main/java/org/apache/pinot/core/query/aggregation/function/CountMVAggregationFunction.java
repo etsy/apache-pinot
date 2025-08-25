@@ -30,24 +30,14 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 
 public class CountMVAggregationFunction extends CountAggregationFunction {
 
-  /**
-   * Constructor for the class.
-   *
-   * @param expression Expression to aggregate on.
-   */
-  public CountMVAggregationFunction(ExpressionContext expression) {
+  public CountMVAggregationFunction(List<ExpressionContext> arguments) {
     // TODO(nhejazi): support proper null handling for aggregation functions on MV columns.
-    super(expression);
+    super(verifySingleArgument(arguments, "COUNT_MV"), false);
   }
 
   @Override
   public AggregationFunctionType getType() {
     return AggregationFunctionType.COUNTMV;
-  }
-
-  @Override
-  public String getColumnName() {
-    return AggregationFunctionType.COUNTMV.getName() + "_" + _expression;
   }
 
   @Override

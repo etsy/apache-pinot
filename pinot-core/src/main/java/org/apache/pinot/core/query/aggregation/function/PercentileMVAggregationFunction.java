@@ -30,22 +30,16 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 public class PercentileMVAggregationFunction extends PercentileAggregationFunction {
 
   public PercentileMVAggregationFunction(ExpressionContext expression, int percentile) {
-    super(expression, percentile);
+    super(expression, percentile, false);
   }
 
   public PercentileMVAggregationFunction(ExpressionContext expression, double percentile) {
-    super(expression, percentile);
+    super(expression, percentile, false);
   }
 
   @Override
   public AggregationFunctionType getType() {
     return AggregationFunctionType.PERCENTILEMV;
-  }
-
-  @Override
-  public String getColumnName() {
-    return _version == 0 ? AggregationFunctionType.PERCENTILE.getName() + (int) _percentile + "MV_" + _expression
-        : AggregationFunctionType.PERCENTILE.getName() + _percentile + "MV_" + _expression;
   }
 
   @Override

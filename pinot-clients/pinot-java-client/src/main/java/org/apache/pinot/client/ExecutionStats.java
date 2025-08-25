@@ -44,7 +44,9 @@ public class ExecutionStats {
   private static final String MIN_CONSUMING_FRESHNESS_TIME_MS = "minConsumingFreshnessTimeMs";
   private static final String TOTAL_DOCS = "totalDocs";
   private static final String NUM_GROUPS_LIMIT_REACHED = "numGroupsLimitReached";
+  private static final String BROKER_REDUCE_TIME_MS = "brokerReduceTimeMs";
   private static final String TIME_USED_MS = "timeUsedMs";
+  private static final String PARTIAL_RESULT = "partialResult";
 
   private final JsonNode _brokerResponse;
 
@@ -109,8 +111,16 @@ public class ExecutionStats {
     return _brokerResponse.has(NUM_GROUPS_LIMIT_REACHED) && _brokerResponse.get(NUM_GROUPS_LIMIT_REACHED).asBoolean();
   }
 
+  public boolean isPartialResult() {
+    return _brokerResponse.has(PARTIAL_RESULT) && _brokerResponse.get(PARTIAL_RESULT).asBoolean();
+  }
+
   public long getTimeUsedMs() {
     return _brokerResponse.has(TIME_USED_MS) ? _brokerResponse.get(TIME_USED_MS).asLong() : -1L;
+  }
+
+  public long getBrokerReduceTimeMs() {
+    return _brokerResponse.has(BROKER_REDUCE_TIME_MS) ? _brokerResponse.get(BROKER_REDUCE_TIME_MS).asLong() : -1L;
   }
 
   @Override
@@ -128,7 +138,9 @@ public class ExecutionStats {
     map.put(MIN_CONSUMING_FRESHNESS_TIME_MS, getMinConsumingFreshnessTimeMs() + "ms");
     map.put(TOTAL_DOCS, getTotalDocs());
     map.put(NUM_GROUPS_LIMIT_REACHED, isNumGroupsLimitReached());
+    map.put(BROKER_REDUCE_TIME_MS, getBrokerReduceTimeMs() + "ms");
     map.put(TIME_USED_MS, getTimeUsedMs() + "ms");
+    map.put(PARTIAL_RESULT, isPartialResult());
     return map.toString();
   }
 }

@@ -18,24 +18,19 @@
  */
 package org.apache.pinot.plugin.stream.kafka20;
 
-import java.util.Set;
-import org.apache.pinot.spi.stream.PartitionLevelConsumer;
+import org.apache.pinot.spi.stream.PartitionGroupConsumer;
+import org.apache.pinot.spi.stream.PartitionGroupConsumptionStatus;
+import org.apache.pinot.spi.stream.StreamConfig;
 import org.apache.pinot.spi.stream.StreamConsumerFactory;
-import org.apache.pinot.spi.stream.StreamLevelConsumer;
 import org.apache.pinot.spi.stream.StreamMetadataProvider;
 
 
 public class KafkaConsumerFactory extends StreamConsumerFactory {
 
   @Override
-  public PartitionLevelConsumer createPartitionLevelConsumer(String clientId, int partition) {
-    return new KafkaPartitionLevelConsumer(clientId, _streamConfig, partition);
-  }
-
-  @Override
-  public StreamLevelConsumer createStreamLevelConsumer(String clientId, String tableName, Set<String> fieldsToRead,
-      String groupId) {
-    return new KafkaStreamLevelConsumer(clientId, tableName, _streamConfig, fieldsToRead, groupId);
+  protected void init(StreamConfig streamConfig) {
+    KafkaConfigBackwardCompatibleUtils.handleStreamConfig(streamConfig);
+    super.init(streamConfig);
   }
 
   @Override
@@ -46,5 +41,12 @@ public class KafkaConsumerFactory extends StreamConsumerFactory {
   @Override
   public StreamMetadataProvider createStreamMetadataProvider(String clientId) {
     return new KafkaStreamMetadataProvider(clientId, _streamConfig);
+  }
+
+  @Override
+  public PartitionGroupConsumer createPartitionGroupConsumer(String clientId,
+      PartitionGroupConsumptionStatus partitionGroupConsumptionStatus) {
+    return new KafkaPartitionLevelConsumer(clientId, _streamConfig,
+        partitionGroupConsumptionStatus.getPartitionGroupId());
   }
 }

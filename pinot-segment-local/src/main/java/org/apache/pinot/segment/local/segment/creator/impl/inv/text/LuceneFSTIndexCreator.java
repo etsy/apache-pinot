@@ -23,10 +23,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.util.fst.FST;
-import org.apache.pinot.segment.local.segment.creator.impl.SegmentColumnarIndexCreator;
 import org.apache.pinot.segment.local.utils.fst.FSTBuilder;
 import org.apache.pinot.segment.spi.V1Constants;
-import org.apache.pinot.segment.spi.index.creator.TextIndexCreator;
+import org.apache.pinot.segment.spi.creator.IndexCreationContext;
+import org.apache.pinot.segment.spi.index.creator.FSTIndexCreator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,8 +37,8 @@ import org.slf4j.LoggerFactory;
  * to dictionary id as an entry.
  *
  */
-public class LuceneFSTIndexCreator implements TextIndexCreator {
-  private static final Logger LOGGER = LoggerFactory.getLogger(SegmentColumnarIndexCreator.class);
+public class LuceneFSTIndexCreator implements FSTIndexCreator {
+  private static final Logger LOGGER = LoggerFactory.getLogger(LuceneFSTIndexCreator.class);
   private final File _fstIndexFile;
   private final FSTBuilder _fstBuilder;
   Integer _dictId;
@@ -55,7 +55,7 @@ public class LuceneFSTIndexCreator implements TextIndexCreator {
    */
   public LuceneFSTIndexCreator(File indexDir, String columnName, String[] sortedEntries)
       throws IOException {
-    _fstIndexFile = new File(indexDir, columnName + V1Constants.Indexes.FST_INDEX_FILE_EXTENSION);
+    _fstIndexFile = new File(indexDir, columnName + V1Constants.Indexes.LUCENE_V99_FST_INDEX_FILE_EXTENSION);
 
     _fstBuilder = new FSTBuilder();
     _dictId = 0;
@@ -64,6 +64,11 @@ public class LuceneFSTIndexCreator implements TextIndexCreator {
         _fstBuilder.addEntry(sortedEntries[_dictId], _dictId);
       }
     }
+  }
+
+  public LuceneFSTIndexCreator(IndexCreationContext context)
+      throws IOException {
+    this(context.getIndexDir(), context.getFieldSpec().getName(), (String[]) context.getSortedUniqueElementsArray());
   }
 
   // Expects dictionary entries in sorted order.
@@ -85,13 +90,13 @@ public class LuceneFSTIndexCreator implements TextIndexCreator {
   @Override
   public void seal()
       throws IOException {
-    LOGGER.info("Sealing FST index: " + _fstIndexFile.getAbsolutePath());
+    LOGGER.info("Sealing FST index: {}", _fstIndexFile.getAbsolutePath());
     FileOutputStream fileOutputStream = null;
     try {
       fileOutputStream = new FileOutputStream(_fstIndexFile);
       FST<Long> fst = _fstBuilder.done();
       OutputStreamDataOutput d = new OutputStreamDataOutput(fileOutputStream);
-      fst.save(d);
+      fst.save(d, d);
     } finally {
       if (fileOutputStream != null) {
         fileOutputStream.close();

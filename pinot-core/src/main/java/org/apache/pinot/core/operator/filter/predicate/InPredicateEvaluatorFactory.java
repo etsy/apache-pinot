@@ -32,10 +32,14 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.request.context.predicate.InPredicate;
+import org.apache.pinot.common.request.context.predicate.Predicate;
 import org.apache.pinot.common.utils.HashUtil;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.data.MultiValueVisitor;
 import org.apache.pinot.spi.utils.ByteArray;
 
 
@@ -49,14 +53,15 @@ public class InPredicateEvaluatorFactory {
   /**
    * Create a new instance of dictionary based IN predicate evaluator.
    *
-   * @param inPredicate IN predicate to evaluate
-   * @param dictionary Dictionary for the column
-   * @param dataType Data type for the column
+   * @param inPredicate  IN predicate to evaluate
+   * @param dictionary   Dictionary for the column
+   * @param dataType     Data type for the column
+   * @param queryContext Query context
    * @return Dictionary based IN predicate evaluator
    */
   public static BaseDictionaryBasedPredicateEvaluator newDictionaryBasedEvaluator(InPredicate inPredicate,
-      Dictionary dictionary, DataType dataType) {
-    return new DictionaryBasedInPredicateEvaluator(inPredicate, dictionary, dataType);
+      Dictionary dictionary, DataType dataType, @Nullable QueryContext queryContext) {
+    return new DictionaryBasedInPredicateEvaluator(inPredicate, dictionary, dataType, queryContext);
   }
 
   /**
@@ -66,8 +71,7 @@ public class InPredicateEvaluatorFactory {
    * @param dataType Data type for the column
    * @return Raw value based IN predicate evaluator
    */
-  public static BaseRawValueBasedPredicateEvaluator newRawValueBasedEvaluator(InPredicate inPredicate,
-      DataType dataType) {
+  public static InRawPredicateEvaluator newRawValueBasedEvaluator(InPredicate inPredicate, DataType dataType) {
     switch (dataType) {
       case INT: {
         int[] intValues = inPredicate.getIntValues();
@@ -124,7 +128,8 @@ public class InPredicateEvaluatorFactory {
         }
         return new LongRawValueBasedInPredicateEvaluator(inPredicate, matchingValues);
       }
-      case STRING: {
+      case STRING:
+      case JSON: {
         List<String> stringValues = inPredicate.getValues();
         Set<String> matchingValues = new ObjectOpenHashSet<>(HashUtil.getMinHashSetSize(stringValues.size()));
         // NOTE: Add value-by-value to avoid overhead
@@ -152,41 +157,34 @@ public class InPredicateEvaluatorFactory {
 
   private static final class DictionaryBasedInPredicateEvaluator extends BaseDictionaryBasedPredicateEvaluator {
     final IntSet _matchingDictIdSet;
-    final int _numMatchingDictIds;
-    int[] _matchingDictIds;
 
-    DictionaryBasedInPredicateEvaluator(InPredicate inPredicate, Dictionary dictionary, DataType dataType) {
-      super(inPredicate);
-      _matchingDictIdSet = PredicateUtils.getDictIdSet(inPredicate, dictionary, dataType);
-      _numMatchingDictIds = _matchingDictIdSet.size();
-      if (_numMatchingDictIds == 0) {
+    DictionaryBasedInPredicateEvaluator(InPredicate inPredicate, Dictionary dictionary, DataType dataType,
+        @Nullable QueryContext queryContext) {
+      super(inPredicate, dictionary);
+      _matchingDictIdSet = PredicateUtils.getDictIdSet(inPredicate, dictionary, dataType, queryContext);
+      int numMatchingDictIds = _matchingDictIdSet.size();
+      if (numMatchingDictIds == 0) {
         _alwaysFalse = true;
-      } else if (dictionary.length() == _numMatchingDictIds) {
+      } else if (dictionary.length() == numMatchingDictIds) {
         _alwaysTrue = true;
       }
     }
 
     @Override
-    public boolean applySV(int dictId) {
-      return _matchingDictIdSet.contains(dictId);
-    }
-
-    @Override
-    public int getNumMatchingDictIds() {
-      return _numMatchingDictIds;
+    protected int[] calculateMatchingDictIds() {
+      int[] matchingDictIds = _matchingDictIdSet.toIntArray();
+      Arrays.sort(matchingDictIds);
+      return matchingDictIds;
     }
 
     @Override
     public int getNumMatchingItems() {
-      return getNumMatchingDictIds();
+      return _matchingDictIdSet.size();
     }
 
     @Override
-    public int[] getMatchingDictIds() {
-      if (_matchingDictIds == null) {
-        _matchingDictIds = _matchingDictIdSet.toIntArray();
-      }
-      return _matchingDictIds;
+    public boolean applySV(int dictId) {
+      return _matchingDictIdSet.contains(dictId);
     }
 
     @Override
@@ -203,7 +201,18 @@ public class InPredicateEvaluatorFactory {
     }
   }
 
-  private static final class IntRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  public static abstract class InRawPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+    public InRawPredicateEvaluator(Predicate predicate) {
+      super(predicate);
+    }
+
+    /**
+     * Visits the matching value of this predicate.
+     */
+    public abstract <R> R accept(MultiValueVisitor<R> visitor);
+  }
+
+  private static final class IntRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     final IntSet _matchingValues;
 
     IntRawValueBasedInPredicateEvaluator(InPredicate inPredicate, IntSet matchingValues) {
@@ -238,9 +247,14 @@ public class InPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.visitInt(_matchingValues.toIntArray());
+    }
   }
 
-  private static final class LongRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class LongRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     final LongSet _matchingValues;
 
     LongRawValueBasedInPredicateEvaluator(InPredicate inPredicate, LongSet matchingValues) {
@@ -275,9 +289,14 @@ public class InPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.visitLong(_matchingValues.toLongArray());
+    }
   }
 
-  private static final class FloatRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class FloatRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     final FloatSet _matchingValues;
 
     FloatRawValueBasedInPredicateEvaluator(InPredicate inPredicate, FloatSet matchingValues) {
@@ -312,9 +331,14 @@ public class InPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.visitFloat(_matchingValues.toFloatArray());
+    }
   }
 
-  private static final class DoubleRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class DoubleRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     final DoubleSet _matchingValues;
 
     DoubleRawValueBasedInPredicateEvaluator(InPredicate inPredicate, DoubleSet matchingValues) {
@@ -349,9 +373,14 @@ public class InPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.visitDouble(_matchingValues.toDoubleArray());
+    }
   }
 
-  private static final class BigDecimalRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class BigDecimalRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     // Note: BigDecimal's compareTo is not consistent with equals (e.g. compareTo(3.0, 3) returns zero when
     //   equals(3.0, 3) returns false).
     // - HashSet implementation consider both hashCode() and equals() for the key.
@@ -379,9 +408,14 @@ public class InPredicateEvaluatorFactory {
     public boolean applySV(BigDecimal value) {
       return _matchingValues.contains(value);
     }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.visitBigDecimal(_matchingValues.toArray(new BigDecimal[0]));
+    }
   }
 
-  private static final class StringRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class StringRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     final Set<String> _matchingValues;
 
     StringRawValueBasedInPredicateEvaluator(InPredicate inPredicate, Set<String> matchingValues) {
@@ -403,9 +437,14 @@ public class InPredicateEvaluatorFactory {
     public boolean applySV(String value) {
       return _matchingValues.contains(value);
     }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.visitString(_matchingValues.toArray(new String[0]));
+    }
   }
 
-  private static final class BytesRawValueBasedInPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class BytesRawValueBasedInPredicateEvaluator extends InRawPredicateEvaluator {
     final Set<ByteArray> _matchingValues;
 
     BytesRawValueBasedInPredicateEvaluator(InPredicate inPredicate, Set<ByteArray> matchingValues) {
@@ -426,6 +465,12 @@ public class InPredicateEvaluatorFactory {
     @Override
     public boolean applySV(byte[] value) {
       return _matchingValues.contains(new ByteArray(value));
+    }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      byte[][] bytes = _matchingValues.stream().map(ByteArray::getBytes).toArray(byte[][]::new);
+      return visitor.visitBytes(bytes);
     }
   }
 }

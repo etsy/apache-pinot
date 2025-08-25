@@ -24,6 +24,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.apache.pinot.spi.crypt.PinotCrypter;
 import org.apache.pinot.spi.crypt.PinotCrypterFactory;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -115,15 +117,21 @@ public class SegmentFetcherFactoryTest {
     }
 
     @Override
-    public File fetchUntarSegmentToLocalStreamed(URI uri, File dest, long rateLimit)
+    public File fetchUntarSegmentToLocalStreamed(URI uri, File dest, long rateLimit, AtomicInteger attempts)
         throws Exception {
       assertEquals(uri, new URI(TEST_URI));
       _fetchFileToLocalCalled++;
+      attempts.set(0);
       return new File("fakeSegmentIndexFile");
     }
 
     @Override
-    public void fetchSegmentToLocal(List<URI> uri, File dest)
+    public void fetchSegmentToLocal(List<URI> uri, File dest) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void fetchSegmentToLocal(String segmentName, Supplier<List<URI>> uriSupplier, File dest)
         throws Exception {
       throw new UnsupportedOperationException();
     }

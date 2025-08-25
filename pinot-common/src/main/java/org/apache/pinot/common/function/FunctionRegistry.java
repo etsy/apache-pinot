@@ -21,7 +21,6 @@ package org.apache.pinot.common.function;
 import com.google.common.base.Preconditions;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +52,8 @@ public class FunctionRegistry {
   // This FUNCTION_MAP is used by Calcite function catalog to look up function by function signature.
   private static final NameMultimap<Function> FUNCTION_MAP = new NameMultimap<>();
 
+  private static final int VAR_ARG_KEY = -1;
+
   /**
    * Registers the scalar functions via reflection.
    * NOTE: In order to plugin methods using reflection, the methods should be inside a class that includes ".function."
@@ -70,12 +71,14 @@ public class FunctionRegistry {
         // Annotated function names
         String[] scalarFunctionNames = scalarFunction.names();
         boolean nullableParameters = scalarFunction.nullableParameters();
+        boolean isPlaceholder = scalarFunction.isPlaceholder();
+        boolean isVarArg = scalarFunction.isVarArg();
         if (scalarFunctionNames.length > 0) {
           for (String name : scalarFunctionNames) {
-            FunctionRegistry.registerFunction(name, method, nullableParameters);
+            FunctionRegistry.registerFunction(name, method, nullableParameters, isPlaceholder, isVarArg);
           }
         } else {
-          FunctionRegistry.registerFunction(method, nullableParameters);
+          FunctionRegistry.registerFunction(method, nullableParameters, isPlaceholder, isVarArg);
         }
       }
     }
@@ -94,28 +97,40 @@ public class FunctionRegistry {
   /**
    * Registers a method with the name of the method.
    */
-  public static void registerFunction(Method method, boolean nullableParameters) {
-    registerFunction(method.getName(), method, nullableParameters);
+  public static void registerFunction(Method method, boolean nullableParameters, boolean isPlaceholder,
+      boolean isVarArg) {
+    registerFunction(method.getName(), method, nullableParameters, isPlaceholder, isVarArg);
   }
 
   /**
    * Registers a method with the given function name.
    */
-  public static void registerFunction(String functionName, Method method, boolean nullableParameters) {
-    registerFunctionInfoMap(functionName, method, nullableParameters);
-    registerCalciteNamedFunctionMap(functionName, method, nullableParameters);
+  public static void registerFunction(String functionName, Method method, boolean nullableParameters,
+      boolean isPlaceholder, boolean isVarArg) {
+    if (!isPlaceholder) {
+      registerFunctionInfoMap(functionName, method, nullableParameters, isVarArg);
+    }
+    registerCalciteNamedFunctionMap(functionName, method, nullableParameters, isVarArg);
   }
 
-  private static void registerFunctionInfoMap(String functionName, Method method, boolean nullableParameters) {
+  private static void registerFunctionInfoMap(String functionName, Method method, boolean nullableParameters,
+      boolean isVarArg) {
     FunctionInfo functionInfo = new FunctionInfo(method, method.getDeclaringClass(), nullableParameters);
     String canonicalName = canonicalize(functionName);
     Map<Integer, FunctionInfo> functionInfoMap = FUNCTION_INFO_MAP.computeIfAbsent(canonicalName, k -> new HashMap<>());
-    FunctionInfo existFunctionInfo = functionInfoMap.put(method.getParameterCount(), functionInfo);
-    Preconditions.checkState(existFunctionInfo == null || existFunctionInfo.getMethod() == functionInfo.getMethod(),
-        "Function: %s with %s parameters is already registered", functionName, method.getParameterCount());
+    if (isVarArg) {
+      FunctionInfo existFunctionInfo = functionInfoMap.put(VAR_ARG_KEY, functionInfo);
+      Preconditions.checkState(existFunctionInfo == null || existFunctionInfo.getMethod() == functionInfo.getMethod(),
+          "Function: %s with variable number of parameters is already registered", functionName);
+    } else {
+      FunctionInfo existFunctionInfo = functionInfoMap.put(method.getParameterCount(), functionInfo);
+      Preconditions.checkState(existFunctionInfo == null || existFunctionInfo.getMethod() == functionInfo.getMethod(),
+          "Function: %s with %s parameters is already registered", functionName, method.getParameterCount());
+    }
   }
 
-  private static void registerCalciteNamedFunctionMap(String functionName, Method method, boolean nullableParameters) {
+  private static void registerCalciteNamedFunctionMap(String functionName, Method method, boolean nullableParameters,
+      boolean isVarArg) {
     if (method.getAnnotation(Deprecated.class) == null) {
       FUNCTION_MAP.put(functionName, ScalarFunctionImpl.create(method));
     }
@@ -123,10 +138,6 @@ public class FunctionRegistry {
 
   public static Map<String, List<Function>> getRegisteredCalciteFunctionMap() {
     return FUNCTION_MAP.map();
-  }
-
-  public static Collection<Function> getRegisteredCalciteFunctions(String name) {
-    return FUNCTION_MAP.map().get(name);
   }
 
   public static Set<String> getRegisteredCalciteFunctionNames() {
@@ -148,7 +159,14 @@ public class FunctionRegistry {
   @Nullable
   public static FunctionInfo getFunctionInfo(String functionName, int numParameters) {
     Map<Integer, FunctionInfo> functionInfoMap = FUNCTION_INFO_MAP.get(canonicalize(functionName));
-    return functionInfoMap != null ? functionInfoMap.get(numParameters) : null;
+    if (functionInfoMap != null) {
+      FunctionInfo functionInfo = functionInfoMap.get(numParameters);
+      if (functionInfo != null) {
+        return functionInfo;
+      }
+      return functionInfoMap.get(VAR_ARG_KEY);
+    }
+    return null;
   }
 
   private static String canonicalize(String functionName) {
@@ -161,34 +179,23 @@ public class FunctionRegistry {
    */
   private static class PlaceholderScalarFunctions {
 
-    @ScalarFunction(names = {"jsonExtractScalar", "json_extract_scalar"})
-    public static Object jsonExtractScalar(String jsonFieldName, String jsonPath, String resultsType) {
-      throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
-    }
-
-    @ScalarFunction(names = {"jsonExtractScalar", "json_extract_scalar"})
-    public static Object jsonExtractScalar(String jsonFieldName, String jsonPath, String resultsType,
-        Object defaultValue) {
-      throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
-    }
-
-    @ScalarFunction(names = {"jsonExtractKey", "json_extract_key"})
-    public static String jsonExtractKey(String jsonFieldName, String jsonPath) {
-      throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
-    }
-
-    @ScalarFunction(names = {"textContains", "text_contains"})
+    @ScalarFunction(names = {"textContains", "text_contains"}, isPlaceholder = true)
     public static boolean textContains(String text, String pattern) {
       throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
     }
 
-    @ScalarFunction(names = {"textMatch", "text_match"})
+    @ScalarFunction(names = {"textMatch", "text_match"}, isPlaceholder = true)
     public static boolean textMatch(String text, String pattern) {
       throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
     }
 
-    @ScalarFunction(names = {"jsonMatch", "json_match"})
+    @ScalarFunction(names = {"jsonMatch", "json_match"}, isPlaceholder = true)
     public static boolean jsonMatch(String text, String pattern) {
+      throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
+    }
+
+    @ScalarFunction(names = {"vectorSimilarity", "vector_similarity"}, isPlaceholder = true)
+    public static boolean vectorSimilarity(float[] vector1, float[] vector2, int topk) {
       throw new UnsupportedOperationException("Placeholder scalar function, should not reach here");
     }
   }

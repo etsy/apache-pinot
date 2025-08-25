@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.query.aggregation.function;
 
+import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
@@ -37,11 +38,11 @@ public class AvgAggregationFunction extends BaseSingleInputAggregationFunction<A
   private static final double DEFAULT_FINAL_RESULT = Double.NEGATIVE_INFINITY;
   private final boolean _nullHandlingEnabled;
 
-  public AvgAggregationFunction(ExpressionContext expression) {
-    this(expression, false);
+  public AvgAggregationFunction(List<ExpressionContext> arguments, boolean nullHandlingEnabled) {
+    this(verifySingleArgument(arguments, "AVG"), nullHandlingEnabled);
   }
 
-  public AvgAggregationFunction(ExpressionContext expression, boolean nullHandlingEnabled) {
+  protected AvgAggregationFunction(ExpressionContext expression, boolean nullHandlingEnabled) {
     super(expression);
     _nullHandlingEnabled = nullHandlingEnabled;
   }
@@ -100,13 +101,15 @@ public class AvgAggregationFunction extends BaseSingleInputAggregationFunction<A
       double[] doubleValues = blockValSet.getDoubleValuesSV();
       if (nullBitmap.getCardinality() < length) {
         double sum = 0.0;
+        long count = 0L;
         // TODO: need to update the for-loop terminating condition to: i < length & i < doubleValues.length?
         for (int i = 0; i < length; i++) {
           if (!nullBitmap.contains(i)) {
             sum += doubleValues[i];
+            count++;
           }
         }
-        setAggregationResult(aggregationResultHolder, sum, length);
+        setAggregationResult(aggregationResultHolder, sum, count);
       }
       // Note: when all input values re null (nullBitmap.getCardinality() == values.length), avg is null. As a result,
       // we don't call setAggregationResult.

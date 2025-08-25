@@ -19,22 +19,37 @@
 package org.apache.pinot.plugin.minion.tasks;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import org.apache.helix.HelixAdmin;
+import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.InstanceConfig;
+import org.apache.pinot.common.restlet.resources.ValidDocIdsBitmapResponse;
+import org.apache.pinot.common.utils.config.InstanceUtils;
 import org.apache.pinot.controller.helix.core.minion.ClusterInfoAccessor;
+import org.apache.pinot.controller.util.ServerSegmentMetadataReader;
+import org.apache.pinot.minion.MinionContext;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableTaskConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.LocalPinotFS;
 import org.apache.pinot.spi.filesystem.PinotFS;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
 import org.apache.pinot.spi.ingestion.batch.BatchConfigProperties;
 import org.apache.pinot.spi.plugin.PluginManager;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.IngestionConfigUtils;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
 public class MinionTaskUtils {
   private static final Logger LOGGER = LoggerFactory.getLogger(MinionTaskUtils.class);
+
+  private static final String DEFAULT_DIR_PATH_TERMINATOR = "/";
 
   private MinionTaskUtils() {
   }
@@ -79,12 +94,13 @@ public class MinionTaskUtils {
       String pushMode = IngestionConfigUtils.getPushMode(taskConfigs);
 
       Map<String, String> singleFileGenerationTaskConfig = new HashMap<>(taskConfigs);
-      if (pushMode == null
-          || pushMode.toUpperCase().contentEquals(BatchConfigProperties.SegmentPushType.TAR.toString())) {
+      if (pushMode == null || pushMode.toUpperCase()
+          .contentEquals(BatchConfigProperties.SegmentPushType.TAR.toString())) {
         singleFileGenerationTaskConfig.put(BatchConfigProperties.PUSH_MODE,
             BatchConfigProperties.SegmentPushType.TAR.toString());
       } else {
-        URI outputDirURI = URI.create(clusterInfoAccessor.getDataDir() + "/" + tableName);
+        URI outputDirURI = URI.create(
+            normalizeDirectoryURI(clusterInfoAccessor.getDataDir()) + TableNameBuilder.extractRawTableName(tableName));
         String outputDirURIScheme = outputDirURI.getScheme();
 
         if (!isLocalOutputDir(outputDirURIScheme)) {
@@ -114,5 +130,80 @@ public class MinionTaskUtils {
 
   public static PinotFS getLocalPinotFs() {
     return new LocalPinotFS();
+  }
+
+  public static String normalizeDirectoryURI(URI dirURI) {
+    return normalizeDirectoryURI(dirURI.toString());
+  }
+
+  public static String normalizeDirectoryURI(String dirInStr) {
+    if (!dirInStr.endsWith(DEFAULT_DIR_PATH_TERMINATOR)) {
+      return dirInStr + DEFAULT_DIR_PATH_TERMINATOR;
+    }
+    return dirInStr;
+  }
+
+  public static ValidDocIdsBitmapResponse getValidDocIdsBitmap(String tableNameWithType, String segmentName,
+      String validDocIdsType, MinionContext minionContext) {
+    HelixAdmin helixAdmin = minionContext.getHelixManager().getClusterManagmentTool();
+    String clusterName = minionContext.getHelixManager().getClusterName();
+
+    List<String> servers = getServers(segmentName, tableNameWithType, helixAdmin, clusterName);
+    for (String server : servers) {
+      InstanceConfig instanceConfig = helixAdmin.getInstanceConfig(clusterName, server);
+      String endpoint = InstanceUtils.getServerAdminEndpoint(instanceConfig);
+
+      // We only need aggregated table size and the total number of docs/rows. Skipping column related stats, by
+      // passing an empty list.
+      ServerSegmentMetadataReader serverSegmentMetadataReader = new ServerSegmentMetadataReader();
+      try {
+        return serverSegmentMetadataReader.getValidDocIdsBitmapFromServer(tableNameWithType, segmentName, endpoint,
+            validDocIdsType, 60_000);
+      } catch (Exception e) {
+        LOGGER.warn(
+            String.format("Unable to retrieve validDocIds bitmap for segment: %s from endpoint: %s", segmentName,
+                endpoint), e);
+      }
+    }
+    throw new IllegalStateException(
+        String.format("Unable to retrieve validDocIds bitmap for segment: %s from servers: %s", segmentName, servers));
+  }
+
+  public static List<String> getServers(String segmentName, String tableNameWithType, HelixAdmin helixAdmin,
+      String clusterName) {
+    ExternalView externalView = helixAdmin.getResourceExternalView(clusterName, tableNameWithType);
+    if (externalView == null) {
+      throw new IllegalStateException("External view does not exist for table: " + tableNameWithType);
+    }
+    Map<String, String> instanceStateMap = externalView.getStateMap(segmentName);
+    if (instanceStateMap == null) {
+      throw new IllegalStateException("Failed to find segment: " + segmentName);
+    }
+    ArrayList<String> servers = new ArrayList<>();
+    for (Map.Entry<String, String> entry : instanceStateMap.entrySet()) {
+      if (entry.getValue().equals(CommonConstants.Helix.StateModel.SegmentStateModel.ONLINE)) {
+        servers.add(entry.getKey());
+      }
+    }
+    if (servers.isEmpty()) {
+      throw new IllegalStateException("Failed to find any ONLINE servers for segment: " + segmentName);
+    }
+    return servers;
+  }
+
+  /**
+   * Extract allowDownloadFromServer config from table task config
+   */
+  public static boolean extractMinionAllowDownloadFromServer(TableConfig tableConfig, String taskType,
+      boolean defaultValue) {
+    TableTaskConfig tableTaskConfig = tableConfig.getTaskConfig();
+    if (tableTaskConfig != null) {
+      Map<String, String> configs = tableTaskConfig.getConfigsForTaskType(taskType);
+      if (configs != null && !configs.isEmpty()) {
+        return Boolean.parseBoolean(
+            configs.getOrDefault(TableTaskConfig.MINION_ALLOW_DOWNLOAD_FROM_SERVER, String.valueOf(defaultValue)));
+      }
+    }
+    return defaultValue;
   }
 }

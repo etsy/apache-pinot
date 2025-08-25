@@ -22,7 +22,14 @@ import React from 'react';
 import ReactDiffViewer, {DiffMethod} from 'react-diff-viewer';
 import { map, isEqual, findIndex, findLast } from 'lodash';
 import app_state from '../app_state';
-import { DISPLAY_SEGMENT_STATUS, SEGMENT_STATUS } from 'Models';
+import {
+  DISPLAY_SEGMENT_STATUS, InstanceType,
+  PinotTableDetails,
+  SEGMENT_STATUS,
+  SegmentStatus,
+  TableData,
+} from 'Models';
+import Loading from '../components/Loading';
 
 const sortArray = function (sortingArr, keyName, ascendingFlag) {
   if (ascendingFlag) {
@@ -47,13 +54,33 @@ const sortArray = function (sortingArr, keyName, ascendingFlag) {
   });
 };
 
-const tableFormat = (data) => {
+const pinotTableDetailsFormat = (tableDetails: PinotTableDetails): Array<string | number | boolean | SegmentStatus | { customRenderer: JSX.Element }> => {
+  return [
+    tableDetails.name,
+    tableDetails.estimated_size || Loading,
+    tableDetails.reported_size || Loading,
+    tableDetails.number_of_segments || Loading,
+    tableDetails.segment_status || Loading
+  ];
+}
+
+const pinotTableDetailsFromArray = (tableDetails: Array<string | number | boolean | SegmentStatus | { customRenderer: JSX.Element }>): PinotTableDetails => {
+  return {
+    name: tableDetails[0] as string,
+    estimated_size: tableDetails[1] as string,
+    reported_size: tableDetails[2] as string,
+    number_of_segments: tableDetails[3] as string,
+    segment_status: tableDetails[4] as any
+  };
+}
+
+const tableFormat = (data: TableData): Array<{ [key: string]: any }> => {
   const rows = data.records;
   const header = data.columns;
 
-  const results = [];
+  const results: Array<{ [key: string]: any }> = [];
   rows.forEach((singleRow) => {
-    const obj = {};
+    const obj: { [key: string]: any } = {};
     singleRow.forEach((val: any, index: number) => {
       obj[header[index]+app_state.columnNameSeparator+index] = val;
     });
@@ -63,55 +90,39 @@ const tableFormat = (data) => {
 };
 
 const getSegmentStatus = (idealStateObj, externalViewObj) => {
-  const idealSegmentKeys = Object.keys(idealStateObj);
-  const idealSegmentCount = idealSegmentKeys.length;
+  const tableStatus = getDisplayTableStatus(idealStateObj, externalViewObj);
+  const statusMismatchDiffComponent = (
+    <ReactDiffViewer
+      oldValue={JSON.stringify(idealStateObj, null, 2)}
+      newValue={JSON.stringify(externalViewObj, null, 2)}
+      splitView={true}
+      showDiffOnly={true}
+      leftTitle={"Ideal State"}
+      rightTitle={"External View"}
+      compareMethod={DiffMethod.WORDS}
+    />
+  );
 
-  const externalSegmentKeys = Object.keys(externalViewObj);
-  const externalSegmentCount = externalSegmentKeys.length;
-
-  if (idealSegmentCount !== externalSegmentCount) {
-    let segmentStatusComponent = (
-        <ReactDiffViewer
-            oldValue={JSON.stringify(idealStateObj, null, 2)}
-            newValue={JSON.stringify(externalViewObj, null, 2)}
-            splitView={true}
-            showDiffOnly={true}
-            leftTitle={"Ideal State"}
-            rightTitle={"External View"}
-            compareMethod={DiffMethod.WORDS}
-        />
-    )
-    return {
-      value: 'Bad',
-      tooltip: `Ideal Segment Count: ${idealSegmentCount} does not match external Segment Count: ${externalSegmentCount}`,
-      component: segmentStatusComponent,
-    };
+  if(tableStatus === DISPLAY_SEGMENT_STATUS.BAD) {
+    return ({
+      value: tableStatus,
+      tooltip: "One or more segments in this table are in bad state. Click the status to view more details.",
+      component: statusMismatchDiffComponent,
+    })
   }
 
-  let segmentStatus = {value: 'Good', tooltip: null, component: null};
-  idealSegmentKeys.map((segmentKey) => {
-    if (segmentStatus.value === 'Good') {
-      if (!isEqual(idealStateObj[segmentKey], externalViewObj[segmentKey])) {
-        let segmentStatusComponent = (
-            <ReactDiffViewer
-                oldValue={JSON.stringify(idealStateObj, null, 2)}
-                newValue={JSON.stringify(externalViewObj, null, 2)}
-                splitView={true}
-                showDiffOnly={true}
-                leftTitle={"Ideal State"}
-                rightTitle={"External View"}
-                compareMethod={DiffMethod.WORDS}
-            />
-        )
-        segmentStatus = {
-          value: 'Bad',
-          tooltip: "Ideal Status does not match external status",
-          component: segmentStatusComponent
-        };
-      }
-    }
+  if(tableStatus === DISPLAY_SEGMENT_STATUS.UPDATING) {
+    return ({
+      value: tableStatus,
+      tooltip: "One or more segments in this table are in updating state. Click the status to view more details.",
+      component: statusMismatchDiffComponent,
+    })
+  }
+
+  return ({
+    value: tableStatus,
+    tooltip: "All segments in this table are in good state.",
   });
-  return segmentStatus;
 };
 
 const findNestedObj = (entireObj, keyToFind, valToFind) => {
@@ -304,9 +315,9 @@ const syncTableSchemaData = (data, showFieldType) => {
   const columnList = [...dimensionFields, ...metricFields, ...dateTimeField];
   if (showFieldType) {
     return {
-      columns: ['Column', 'Type', 'Field Type'],
+      columns: ['Column', 'Type', 'Field Type', 'Multi Value'],
       records: columnList.map((field) => {
-        return [field.name, field.dataType, field.fieldType];
+        return [field.name, field.dataType, field.fieldType, getMultiValueField(field)];
       }),
     };
   }
@@ -318,6 +329,18 @@ const syncTableSchemaData = (data, showFieldType) => {
   };
 };
 
+const getMultiValueField = (field): boolean => {
+  if(!field) {
+    return false;
+  }
+
+  if("singleValueField" in field && field.singleValueField === false) {
+    return true;
+  }
+
+  return false;
+}
+
 const encodeString = (str: string) => {
   if(str === unescape(str)){
     return escape(str);
@@ -325,7 +348,7 @@ const encodeString = (str: string) => {
   return str;
 }
 
-const formatBytes = (bytes, decimals = 2) => {
+const formatBytes = (bytes: number, decimals = 2) => {
   if (bytes === 0) return '0 Bytes';
 
   const k = 1024;
@@ -346,6 +369,21 @@ const splitStringByLastUnderscore = (str: string) => {
   return [beforeUnderscore, afterUnderscore];
 }
 
+export const getDisplayTableStatus = (idealStateObj, externalViewObj): DISPLAY_SEGMENT_STATUS => {
+  const segmentStatusArr = [];
+  Object.keys(idealStateObj).forEach((key) => {
+    segmentStatusArr.push(getDisplaySegmentStatus(idealStateObj[key], externalViewObj[key]))
+  })
+
+  if(segmentStatusArr.includes(DISPLAY_SEGMENT_STATUS.BAD)) {
+    return DISPLAY_SEGMENT_STATUS.BAD;
+  }
+  if(segmentStatusArr.includes(DISPLAY_SEGMENT_STATUS.UPDATING)) {
+    return DISPLAY_SEGMENT_STATUS.UPDATING;
+  }
+  return DISPLAY_SEGMENT_STATUS.GOOD;
+}
+
 export const getDisplaySegmentStatus = (idealState, externalView): DISPLAY_SEGMENT_STATUS => {
   const externalViewStatesArray = Object.values(externalView || {});
 
@@ -355,7 +393,7 @@ export const getDisplaySegmentStatus = (idealState, externalView): DISPLAY_SEGME
   }
 
   // if EV status is CONSUMING or ONLINE then segment is in Good state
-  if(externalViewStatesArray.every((status) => status === SEGMENT_STATUS.CONSUMING || status === SEGMENT_STATUS.ONLINE)) {
+  if(externalViewStatesArray.every((status) => status === SEGMENT_STATUS.CONSUMING || status === SEGMENT_STATUS.ONLINE) && isEqual(idealState, externalView)) {
     return DISPLAY_SEGMENT_STATUS.GOOD;
   }
 
@@ -367,11 +405,48 @@ export const getDisplaySegmentStatus = (idealState, externalView): DISPLAY_SEGME
   // If EV is empty or EV state is OFFLINE and does not matches IS then segment is in Partial state.
   // PARTIAL state can also be interpreted as we're waiting for segments to converge
   if(externalViewStatesArray.length === 0 || externalViewStatesArray.includes(SEGMENT_STATUS.OFFLINE) && !isEqual(idealState, externalView)) {
-    return DISPLAY_SEGMENT_STATUS.PARTIAL;
+    return DISPLAY_SEGMENT_STATUS.UPDATING;
   }
 
   // does not match any condition -> assume PARTIAL state as we are waiting for segments to converge 
-  return DISPLAY_SEGMENT_STATUS.PARTIAL;
+  return DISPLAY_SEGMENT_STATUS.UPDATING;
+}
+
+export const getInstanceTypeFromInstanceName = (instanceName: string): InstanceType => {
+  if (instanceName.toLowerCase().startsWith(InstanceType.BROKER.toLowerCase())) {
+    return InstanceType.BROKER;
+  } else if (instanceName.toLowerCase().startsWith(InstanceType.CONTROLLER.toLowerCase())) {
+    return InstanceType.CONTROLLER;
+  } else if (instanceName.toLowerCase().startsWith(InstanceType.MINION.toLowerCase())) {
+    return InstanceType.MINION;
+  } else if (instanceName.toLowerCase().startsWith(InstanceType.SERVER.toLowerCase())) {
+    return InstanceType.SERVER;
+  }  else {
+    return null;
+  }
+}
+
+export const getInstanceTypeFromString = (instanceType: string): InstanceType => {
+  if (instanceType.toLowerCase() === InstanceType.BROKER.toLowerCase()) {
+    return InstanceType.BROKER;
+  } else if (instanceType.toLowerCase() === InstanceType.CONTROLLER.toLowerCase()) {
+    return InstanceType.CONTROLLER;
+  } else if (instanceType.toLowerCase() === InstanceType.MINION.toLowerCase()) {
+    return InstanceType.MINION;
+  } else if (instanceType.toLowerCase() === InstanceType.SERVER.toLowerCase()) {
+    return InstanceType.SERVER;
+  }  else {
+    return null;
+  }
+}
+
+const getLoadingTableData = (columns: string[]): TableData => {
+  return {
+    columns: columns,
+    records: [
+      columns.map((_) => Loading),
+    ],
+  };
 }
 
 export default {
@@ -385,5 +460,8 @@ export default {
   syncTableSchemaData,
   encodeString,
   formatBytes,
-  splitStringByLastUnderscore
+  splitStringByLastUnderscore,
+  pinotTableDetailsFormat,
+  pinotTableDetailsFromArray,
+  getLoadingTableData
 };

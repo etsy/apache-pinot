@@ -33,10 +33,15 @@ import javax.ws.rs.POST;
 import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
@@ -44,12 +49,18 @@ import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.UPSERT_RESOURCE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.UPSERT_RESOURCE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotUpsertRestletResource {
 
@@ -81,15 +92,18 @@ public class PinotUpsertRestletResource {
    */
   @POST
   @Path("/upsert/estimateHeapUsage")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.ESTIMATE_UPSERT_MEMORY)
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Estimate memory usage for an upsert table", notes =
       "This API returns the estimated heap usage based on primary key column stats."
           + " This allows us to estimate table size before onboarding.")
+  // TODO: Switch to use TableConfigs
   public String estimateHeapUsage(String tableSchemaConfigStr,
       @ApiParam(value = "cardinality", required = true) @QueryParam("cardinality") long cardinality,
       @ApiParam(value = "primaryKeySize", defaultValue = "-1") @QueryParam("primaryKeySize") int primaryKeySize,
-      @ApiParam(value = "numPartitions", defaultValue = "-1") @QueryParam("numPartitions") int numPartitions) {
+      @ApiParam(value = "numPartitions", defaultValue = "-1") @QueryParam("numPartitions") int numPartitions,
+      @Context HttpHeaders headers) {
     ObjectNode resultData = JsonUtils.newObjectNode();
     TableAndSchemaConfig tableSchemaConfig;
 
@@ -102,9 +116,11 @@ public class PinotUpsertRestletResource {
     }
 
     TableConfig tableConfig = tableSchemaConfig.getTableConfig();
-    resultData.put("tableName", tableConfig.getTableName());
-
+    String tableNameWithType = DatabaseUtils.translateTableName(tableConfig.getTableName(), headers);
+    tableConfig.setTableName(tableNameWithType);
     Schema schema = tableSchemaConfig.getSchema();
+
+    resultData.put("tableName", tableNameWithType);
 
     // Estimated key space, it contains primary key columns.
     int bytesPerKey = 0;
@@ -129,14 +145,25 @@ public class PinotUpsertRestletResource {
     // Estimated value space, it contains <segmentName, DocId, ComparisonValue(timestamp)> and overhead.
     // Here we only calculate the map content size. TODO: Add the map entry size and the array size within the map.
     int bytesPerValue = 60;
-    String comparisonColumn = tableConfig.getUpsertConfig().getComparisonColumn();
-    if (comparisonColumn != null) {
-      FieldSpec.DataType dt = schema.getFieldSpecFor(comparisonColumn).getDataType();
-      if (!dt.isFixedWidth()) {
-        String msg = "Not support data types for the comparison column";
-        throw new ControllerApplicationException(LOGGER, msg, Response.Status.BAD_REQUEST);
-      } else {
-        bytesPerValue = 52 + dt.size();
+    List<String> comparisonColumns = tableConfig.getUpsertConfig().getComparisonColumns();
+    if (comparisonColumns != null) {
+      int bytesPerArrayElem = 8;  // object ref
+      bytesPerValue = 52;
+      for (String columnName : comparisonColumns) {
+        FieldSpec.DataType dt = schema.getFieldSpecFor(columnName).getDataType();
+        if (!dt.isFixedWidth()) {
+          String msg = "Not support data types for the comparison column";
+          throw new ControllerApplicationException(LOGGER, msg, Response.Status.BAD_REQUEST);
+        } else {
+          if (comparisonColumns.size() == 1) {
+            bytesPerValue += dt.size();
+          } else {
+            bytesPerValue += bytesPerArrayElem + dt.size();
+          }
+        }
+      }
+      if (comparisonColumns.size() > 1) {
+        bytesPerValue += 48 + 4;  // array overhead + comparableIndex integer
       }
     }
 

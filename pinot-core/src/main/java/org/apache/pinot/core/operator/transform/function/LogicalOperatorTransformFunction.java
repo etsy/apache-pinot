@@ -21,9 +21,13 @@ package org.apache.pinot.core.operator.transform.function;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import org.apache.pinot.core.operator.blocks.ProjectionBlock;
+import javax.annotation.Nullable;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
-import org.apache.pinot.segment.spi.datasource.DataSource;
+import org.apache.pinot.spi.data.FieldSpec;
+import org.glassfish.jersey.internal.guava.Preconditions;
+import org.roaringbitmap.RoaringBitmap;
 
 
 /**
@@ -31,11 +35,10 @@ import org.apache.pinot.segment.spi.datasource.DataSource;
  * The results are BOOLEAN type.
  */
 public abstract class LogicalOperatorTransformFunction extends BaseTransformFunction {
-  protected List<TransformFunction> _arguments;
 
   @Override
-  public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
-    _arguments = arguments;
+  public void init(List<TransformFunction> arguments, Map<String, ColumnContext> columnContextMap) {
+    super.init(arguments, columnContextMap);
     int numArguments = arguments.size();
     if (numArguments <= 1) {
       throw new IllegalArgumentException(
@@ -44,10 +47,10 @@ public abstract class LogicalOperatorTransformFunction extends BaseTransformFunc
     }
     for (int i = 0; i < numArguments; i++) {
       TransformResultMetadata argumentMetadata = arguments.get(i).getResultMetadata();
-      if (!(argumentMetadata.isSingleValue() && argumentMetadata.getDataType().getStoredType().isNumeric())) {
-        throw new IllegalArgumentException(
-            "Unsupported argument of index: " + i + ", expecting single-valued boolean/number");
-      }
+      FieldSpec.DataType storedType = argumentMetadata.getDataType().getStoredType();
+      Preconditions.checkState(
+          argumentMetadata.isSingleValue() && storedType.isNumeric() || storedType.isUnknown(),
+          "Unsupported argument type. Expecting single-valued boolean/number");
     }
   }
 
@@ -57,16 +60,14 @@ public abstract class LogicalOperatorTransformFunction extends BaseTransformFunc
   }
 
   @Override
-  public int[] transformToIntValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_intValuesSV == null) {
-      _intValuesSV = new int[numDocs];
-    }
-    System.arraycopy(_arguments.get(0).transformToIntValuesSV(projectionBlock), 0, _intValuesSV, 0, numDocs);
+  public int[] transformToIntValuesSV(ValueBlock valueBlock) {
+    int numDocs = valueBlock.getNumDocs();
+    initIntValuesSV(numDocs);
+    System.arraycopy(_arguments.get(0).transformToIntValuesSV(valueBlock), 0, _intValuesSV, 0, numDocs);
     int numArguments = _arguments.size();
     for (int i = 1; i < numArguments; i++) {
       TransformFunction transformFunction = _arguments.get(i);
-      int[] results = transformFunction.transformToIntValuesSV(projectionBlock);
+      int[] results = transformFunction.transformToIntValuesSV(valueBlock);
       for (int j = 0; j < numDocs; j++) {
         _intValuesSV[j] = getLogicalFuncResult(_intValuesSV[j], results[j]);
       }
@@ -74,5 +75,35 @@ public abstract class LogicalOperatorTransformFunction extends BaseTransformFunc
     return _intValuesSV;
   }
 
+  @Nullable
+  @Override
+  public RoaringBitmap getNullBitmap(ValueBlock valueBlock) {
+    int numDocs = valueBlock.getNumDocs();
+    int numArguments = _arguments.size();
+    RoaringBitmap nullBitmap = new RoaringBitmap();
+    boolean[] supersedesNull = new boolean[numDocs];
+    for (int i = 0; i < numArguments; i++) {
+      int[] intValues = _arguments.get(i).transformToIntValuesSV(valueBlock);
+      RoaringBitmap argumentNullBitmap = _arguments.get(i).getNullBitmap(valueBlock);
+      for (int docId = 0; docId < numDocs; docId++) {
+        if ((argumentNullBitmap == null || !argumentNullBitmap.contains(docId)) && valueSupersedesNull(
+            intValues[docId])) {
+          supersedesNull[docId] = true;
+          nullBitmap.remove(docId);
+        }
+      }
+      if (argumentNullBitmap != null) {
+        for (int docId : argumentNullBitmap) {
+          if (!supersedesNull[docId]) {
+            nullBitmap.add(docId);
+          }
+        }
+      }
+    }
+    return nullBitmap.isEmpty() ? null : nullBitmap;
+  }
+
   abstract int getLogicalFuncResult(int left, int right);
+
+  abstract boolean valueSupersedesNull(int i);
 }

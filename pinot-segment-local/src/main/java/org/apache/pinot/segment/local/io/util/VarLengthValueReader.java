@@ -18,6 +18,8 @@
  */
 package org.apache.pinot.segment.local.io.util;
 
+import java.util.List;
+import org.apache.pinot.segment.spi.index.reader.ForwardIndexReader;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -82,12 +84,12 @@ public class VarLengthValueReader implements ValueReader {
   }
 
   @Override
-  public byte[] getUnpaddedBytes(int index, int numBytesPerValue, byte paddingByte, byte[] buffer) {
+  public byte[] getUnpaddedBytes(int index, int numBytesPerValue, byte[] buffer) {
     return getBytes(index, numBytesPerValue);
   }
 
   @Override
-  public String getUnpaddedString(int index, int numBytesPerValue, byte paddingByte, byte[] buffer) {
+  public String getUnpaddedString(int index, int numBytesPerValue, byte[] buffer) {
     assert buffer.length >= numBytesPerValue;
 
     // Read the offset of the byte array first and then read the actual byte array.
@@ -99,6 +101,15 @@ public class VarLengthValueReader implements ValueReader {
     assert numBytesPerValue >= length;
     _dataBuffer.copyTo(startOffset, buffer, 0, length);
     return new String(buffer, 0, length, UTF_8);
+  }
+
+  public void recordOffsetRanges(int index, long baseOffset, List<ForwardIndexReader.ByteRange> rangeList) {
+    int offsetPosition = _dataSectionStartOffSet + Integer.BYTES * index;
+    int startOffset = _dataBuffer.getInt(offsetPosition);
+    int endOffset = _dataBuffer.getInt(offsetPosition + Integer.BYTES);
+    rangeList.add(new ForwardIndexReader.ByteRange(offsetPosition + baseOffset, 2 * Integer.BYTES));
+    int length = endOffset - startOffset;
+    rangeList.add(new ForwardIndexReader.ByteRange(startOffset + baseOffset, length));
   }
 
   @Override
@@ -117,6 +128,24 @@ public class VarLengthValueReader implements ValueReader {
     byte[] value = new byte[length];
     _dataBuffer.copyTo(startOffset, value);
     return value;
+  }
+
+  @Override
+  public int compareUtf8Bytes(int index, int numBytesPerValue, byte[] bytes) {
+    int offsetPosition = _dataSectionStartOffSet + Integer.BYTES * index;
+    int startOffset = _dataBuffer.getInt(offsetPosition);
+    int endOffset = _dataBuffer.getInt(offsetPosition + Integer.BYTES);
+    int length = endOffset - startOffset;
+    return ValueReaderComparisons.compareUtf8Bytes(_dataBuffer, startOffset, length, false, bytes);
+  }
+
+  @Override
+  public int compareBytes(int index, int numBytesPerValue, byte[] bytes) {
+    int offsetPosition = _dataSectionStartOffSet + Integer.BYTES * index;
+    int startOffset = _dataBuffer.getInt(offsetPosition);
+    int endOffset = _dataBuffer.getInt(offsetPosition + Integer.BYTES);
+    int length = endOffset - startOffset;
+    return ValueReaderComparisons.compareBytes(_dataBuffer, startOffset, length, bytes);
   }
 
   @Override

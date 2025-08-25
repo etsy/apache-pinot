@@ -18,83 +18,171 @@
  */
 package org.apache.pinot.query.runtime.operator.operands;
 
-
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Ordering;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntPredicate;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.query.planner.logical.RexExpression;
 
 
-public abstract class FilterOperand extends TransformOperand {
+/**
+ * NOTE: All BOOLEAN values are represented as 0 (FALSE) and 1 (TRUE) internally.
+ */
+public abstract class FilterOperand implements TransformOperand {
 
   @Override
-  public abstract Boolean apply(Object[] row);
+  public ColumnDataType getResultType() {
+    return ColumnDataType.BOOLEAN;
+  }
+
+  @Nullable
+  @Override
+  public abstract Integer apply(Object[] row);
 
   public static class And extends FilterOperand {
     List<TransformOperand> _childOperands;
 
-    public And(List<RexExpression> childExprs, DataSchema inputDataSchema) {
-      _childOperands = new ArrayList<>(childExprs.size());
-      for (RexExpression childExpr : childExprs) {
-        _childOperands.add(toTransformOperand(childExpr, inputDataSchema));
+    public And(List<RexExpression> children, DataSchema dataSchema) {
+      _childOperands = new ArrayList<>(children.size());
+      for (RexExpression child : children) {
+        _childOperands.add(TransformOperandFactory.getTransformOperand(child, dataSchema));
       }
     }
 
+    @Nullable
     @Override
-    public Boolean apply(Object[] row) {
+    public Integer apply(Object[] row) {
+      boolean hasNull = false;
       for (TransformOperand child : _childOperands) {
-        if (!(Boolean) child.apply(row)) {
-          return false;
+        Object result = child.apply(row);
+        if (result == null) {
+          hasNull = true;
+        } else if ((int) result == 0) {
+          return 0;
         }
       }
-      return true;
+      return hasNull ? null : 1;
     }
   }
 
   public static class Or extends FilterOperand {
     List<TransformOperand> _childOperands;
 
-    public Or(List<RexExpression> childExprs, DataSchema inputDataSchema) {
-      _childOperands = new ArrayList<>(childExprs.size());
-      for (RexExpression childExpr : childExprs) {
-        _childOperands.add(toTransformOperand(childExpr, inputDataSchema));
+    public Or(List<RexExpression> children, DataSchema dataSchema) {
+      _childOperands = new ArrayList<>(children.size());
+      for (RexExpression child : children) {
+        _childOperands.add(TransformOperandFactory.getTransformOperand(child, dataSchema));
       }
     }
 
+    @Nullable
     @Override
-    public Boolean apply(Object[] row) {
+    public Integer apply(Object[] row) {
+      boolean hasNull = false;
       for (TransformOperand child : _childOperands) {
-        if ((Boolean) child.apply(row)) {
-          return true;
+        Object result = child.apply(row);
+        if (result == null) {
+          hasNull = true;
+        } else if ((int) result == 1) {
+          return 1;
         }
       }
-      return false;
+      return hasNull ? null : 0;
     }
   }
 
   public static class Not extends FilterOperand {
     TransformOperand _childOperand;
 
-    public Not(RexExpression childExpr, DataSchema inputDataSchema) {
-      _childOperand = toTransformOperand(childExpr, inputDataSchema);
+    public Not(RexExpression child, DataSchema dataSchema) {
+      _childOperand = TransformOperandFactory.getTransformOperand(child, dataSchema);
     }
 
+    @Nullable
     @Override
-    public Boolean apply(Object[] row) {
-      return !(Boolean) _childOperand.apply(row);
+    public Integer apply(Object[] row) {
+      Object result = _childOperand.apply(row);
+      return result != null ? 1 - (int) result : null;
     }
   }
 
-  public static abstract class Predicate extends FilterOperand {
-    protected final TransformOperand _lhs;
-    protected final TransformOperand _rhs;
-    protected final boolean _requireCasting;
-    protected final DataSchema.ColumnDataType _commonCastType;
+  public static class In extends FilterOperand {
+    List<TransformOperand> _childOperands;
+    boolean _isNotIn;
+
+    public In(List<RexExpression> children, DataSchema dataSchema, boolean isNotIn) {
+      _childOperands = new ArrayList<>(children.size());
+      for (RexExpression child : children) {
+        _childOperands.add(TransformOperandFactory.getTransformOperand(child, dataSchema));
+      }
+      _isNotIn = isNotIn;
+    }
+
+    @Nullable
+    @Override
+    public Integer apply(Object[] row) {
+      Object firstResult = _childOperands.get(0).apply(row);
+      if (firstResult == null) {
+        return null;
+      }
+      for (int i = 1; i < _childOperands.size(); i++) {
+        Object result = _childOperands.get(i).apply(row);
+        if (result == null) {
+          return null;
+        }
+        if (firstResult.equals(result)) {
+          return _isNotIn ? 0 : 1;
+        }
+      }
+      return _isNotIn ? 1 : 0;
+    }
+  }
+
+  public static class IsTrue extends FilterOperand {
+    TransformOperand _childOperand;
+
+    public IsTrue(RexExpression child, DataSchema dataSchema) {
+      _childOperand = TransformOperandFactory.getTransformOperand(child, dataSchema);
+    }
+
+    @Override
+    public Integer apply(Object[] row) {
+      Object result = _childOperand.apply(row);
+      return result != null ? (Integer) result : 0;
+    }
+  }
+
+  public static class IsNotTrue extends FilterOperand {
+    TransformOperand _childOperand;
+
+    public IsNotTrue(RexExpression child, DataSchema dataSchema) {
+      _childOperand = TransformOperandFactory.getTransformOperand(child, dataSchema);
+    }
+
+    @Override
+    public Integer apply(Object[] row) {
+      Object result = _childOperand.apply(row);
+      return result != null ? 1 - (int) result : 1;
+    }
+  }
+
+  public static class Predicate extends FilterOperand {
+    private static final Ordering<ColumnDataType> NUMERIC_TYPE_ORDERING =
+        Ordering.explicit(ColumnDataType.INT, ColumnDataType.LONG, ColumnDataType.FLOAT, ColumnDataType.DOUBLE);
+
+    private final TransformOperand _lhs;
+    private final TransformOperand _rhs;
+    private final IntPredicate _comparisonResultPredicate;
+    private final boolean _requireCasting;
+    private final ColumnDataType _commonCastType;
 
     /**
      * Predicate constructor also resolve data type,
-     * since we don't have a exhausted list of filter function signatures. we rely on type casting.
+     * since we don't have an exhausted list of filter function signatures. we rely on type casting.
      *
      * <ul>
      *   <li>if both RHS and LHS has null data type, exception occurs.</li>
@@ -102,33 +190,60 @@ public abstract class FilterOperand extends TransformOperand {
      *   <li>if either side supertype of the other, we use the super type.</li>
      *   <li>if we can't resolve a common data type, exception occurs.</li>
      * </ul>
-     *
-     *
      */
-    public Predicate(List<RexExpression> functionOperands, DataSchema inputDataSchema) {
-      Preconditions.checkState(functionOperands.size() == 2,
-          "Expected 2 function ops for Predicate but got:" + functionOperands.size());
-      _lhs = TransformOperand.toTransformOperand(functionOperands.get(0), inputDataSchema);
-      _rhs = TransformOperand.toTransformOperand(functionOperands.get(1), inputDataSchema);
+    public Predicate(List<RexExpression> operands, DataSchema dataSchema, IntPredicate comparisonResultPredicate) {
+      Preconditions.checkState(operands.size() == 2, "Predicate takes 2 arguments, got: %s" + operands.size());
+      _lhs = TransformOperandFactory.getTransformOperand(operands.get(0), dataSchema);
+      _rhs = TransformOperandFactory.getTransformOperand(operands.get(1), dataSchema);
+      _comparisonResultPredicate = comparisonResultPredicate;
 
-      // TODO: Correctly throw exception instead of returning null.
-      // Currently exception thrown during constructor is not piped back to query dispatcher, thus in order to
-      // avoid silent failure, we deliberately set to null here, make the exception thrown during data processing.
-      // TODO: right now all the numeric columns are still doing conversion b/c even if the inputDataSchema asked for
-      // one of the number type, it might not contain the exact type in the payload.
-      if (_lhs._resultType == null || _lhs._resultType == DataSchema.ColumnDataType.OBJECT
-          || _rhs._resultType == null || _rhs._resultType == DataSchema.ColumnDataType.OBJECT) {
+      ColumnDataType lhsType = _lhs.getResultType();
+      ColumnDataType rhsType = _rhs.getResultType();
+      if (lhsType == rhsType) {
         _requireCasting = false;
         _commonCastType = null;
-      } else if (_lhs._resultType.isSuperTypeOf(_rhs._resultType)) {
-        _requireCasting = _lhs._resultType != _rhs._resultType || _lhs._resultType.isNumber();
-        _commonCastType = _lhs._resultType;
-      } else if (_rhs._resultType.isSuperTypeOf(_lhs._resultType)) {
-        _requireCasting = _lhs._resultType != _rhs._resultType || _rhs._resultType.isNumber();
-        _commonCastType = _rhs._resultType;
       } else {
-        _requireCasting = false;
-        _commonCastType = null;
+        _requireCasting = true;
+        try {
+          _commonCastType = NUMERIC_TYPE_ORDERING.max(lhsType, rhsType);
+        } catch (Exception e) {
+          throw new IllegalStateException(
+              String.format("Cannot compare incompatible type: %s and: %s", lhsType, rhsType));
+        }
+      }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    @Nullable
+    @Override
+    public Integer apply(Object[] row) {
+      Comparable v1 = (Comparable) _lhs.apply(row);
+      if (v1 == null) {
+        return null;
+      }
+      Comparable v2 = (Comparable) _rhs.apply(row);
+      if (v2 == null) {
+        return null;
+      }
+      if (_requireCasting) {
+        v1 = cast(v1, _commonCastType);
+        v2 = cast(v2, _commonCastType);
+      }
+      return _comparisonResultPredicate.test(v1.compareTo(v2)) ? 1 : 0;
+    }
+
+    private static Comparable<?> cast(Object value, ColumnDataType type) {
+      switch (type) {
+        case INT:
+          return ((Number) value).intValue();
+        case LONG:
+          return ((Number) value).longValue();
+        case FLOAT:
+          return ((Number) value).floatValue();
+        case DOUBLE:
+          return ((Number) value).doubleValue();
+        default:
+          throw new IllegalStateException(String.format("Cannot cast value: %s to type: %s", value, type));
       }
     }
   }

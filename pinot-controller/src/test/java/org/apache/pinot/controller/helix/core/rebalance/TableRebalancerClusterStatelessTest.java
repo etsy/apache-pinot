@@ -24,8 +24,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.configuration.BaseConfiguration;
-import org.apache.commons.configuration.Configuration;
 import org.apache.pinot.common.assignment.InstancePartitions;
 import org.apache.pinot.common.assignment.InstancePartitionsUtils;
 import org.apache.pinot.common.tier.TierFactory;
@@ -42,7 +40,6 @@ import org.apache.pinot.spi.config.table.assignment.InstanceReplicaGroupPartitio
 import org.apache.pinot.spi.config.table.assignment.InstanceTagPoolConfig;
 import org.apache.pinot.spi.config.tenant.Tenant;
 import org.apache.pinot.spi.config.tenant.TenantRole;
-import org.apache.pinot.spi.utils.RebalanceConfigConstants;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.testng.annotations.AfterClass;
@@ -100,10 +97,11 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setNumReplicas(NUM_REPLICAS).build();
 
     // Rebalance should fail without creating the table
-    RebalanceResult rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    RebalanceResult rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.FAILED);
 
     // Create the table
+    addDummySchema(RAW_TABLE_NAME);
     _helixResourceManager.addTable(tableConfig);
 
     // Add the segments
@@ -116,7 +114,7 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         _helixResourceManager.getTableIdealState(OFFLINE_TABLE_NAME).getRecord().getMapFields();
 
     // Rebalance should return NO_OP status
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.NO_OP);
 
     // All servers should be assigned to the table
@@ -139,9 +137,9 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
     }
 
     // Rebalance in dry-run mode
-    Configuration rebalanceConfig = new BaseConfiguration();
-    rebalanceConfig.addProperty(RebalanceConfigConstants.DRY_RUN, true);
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig);
+    RebalanceConfig rebalanceConfig = new RebalanceConfig();
+    rebalanceConfig.setDryRun(true);
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig, null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
 
     // All servers should be assigned to the table
@@ -169,9 +167,9 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         oldSegmentAssignment);
 
     // Rebalance with 3 min available replicas should fail as the table only have 3 replicas
-    rebalanceConfig = new BaseConfiguration();
-    rebalanceConfig.addProperty(RebalanceConfigConstants.MIN_REPLICAS_TO_KEEP_UP_FOR_NO_DOWNTIME, 3);
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig);
+    rebalanceConfig = new RebalanceConfig();
+    rebalanceConfig.setMinAvailableReplicas(3);
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig, null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.FAILED);
 
     // IdealState should not change for FAILED rebalance
@@ -179,9 +177,9 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         oldSegmentAssignment);
 
     // Rebalance with 2 min available replicas should succeed
-    rebalanceConfig = new BaseConfiguration();
-    rebalanceConfig.addProperty(RebalanceConfigConstants.MIN_REPLICAS_TO_KEEP_UP_FOR_NO_DOWNTIME, 2);
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig);
+    rebalanceConfig = new RebalanceConfig();
+    rebalanceConfig.setMinAvailableReplicas(2);
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig, null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
 
     // Result should be the same as the result in dry-run mode
@@ -195,13 +193,13 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
     InstanceTagPoolConfig tagPoolConfig =
         new InstanceTagPoolConfig(TagNameUtils.getOfflineTagForTenant(null), false, 0, null);
     InstanceReplicaGroupPartitionConfig replicaGroupPartitionConfig =
-        new InstanceReplicaGroupPartitionConfig(true, 0, NUM_REPLICAS, 0, 0, 0, false);
-    tableConfig.setInstanceAssignmentConfigMap(Collections.singletonMap(InstancePartitionsType.OFFLINE,
-        new InstanceAssignmentConfig(tagPoolConfig, null, replicaGroupPartitionConfig)));
+        new InstanceReplicaGroupPartitionConfig(true, 0, NUM_REPLICAS, 0, 0, 0, false, null);
+    tableConfig.setInstanceAssignmentConfigMap(Collections.singletonMap(InstancePartitionsType.OFFLINE.toString(),
+        new InstanceAssignmentConfig(tagPoolConfig, null, replicaGroupPartitionConfig, null, false)));
     _helixResourceManager.updateTableConfig(tableConfig);
 
     // No need to reassign instances because instances should be automatically assigned when updating the table config
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
 
     // There should be 3 replica-groups, each with 2 servers
@@ -246,16 +244,18 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
     tableConfig.setInstanceAssignmentConfigMap(null);
     _helixResourceManager.updateTableConfig(tableConfig);
 
-    // Without instances reassignment, the rebalance should return status NO_OP as instance partitions are already
-    // generated
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    // Without instances reassignment, the rebalance should return status NO_OP, and the existing instance partitions
+    // should be used
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.NO_OP);
+    assertEquals(rebalanceResult.getInstanceAssignment(), instanceAssignment);
+    assertEquals(rebalanceResult.getSegmentAssignment(), newSegmentAssignment);
 
-    // With instances reassignment, the instance partitions should be removed, and the default instance partitions
-    // should be used for segment assignment
-    rebalanceConfig = new BaseConfiguration();
-    rebalanceConfig.addProperty(RebalanceConfigConstants.REASSIGN_INSTANCES, true);
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig);
+    // With instances reassignment, the rebalance should return status DONE, the existing instance partitions should be
+    // removed, and the default instance partitions should be used
+    rebalanceConfig = new RebalanceConfig();
+    rebalanceConfig.setReassignInstances(true);
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig, null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
     assertNull(InstancePartitionsUtils.fetchInstancePartitions(_propertyStore,
         InstancePartitionsType.OFFLINE.getInstancePartitionsName(RAW_TABLE_NAME)));
@@ -281,9 +281,9 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
     }
 
     // Rebalance with downtime should succeed
-    rebalanceConfig = new BaseConfiguration();
-    rebalanceConfig.addProperty(RebalanceConfigConstants.DOWNTIME, true);
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig);
+    rebalanceConfig = new RebalanceConfig();
+    rebalanceConfig.setDowntime(true);
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, rebalanceConfig, null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
 
     // All servers with tag should be assigned to the table
@@ -330,6 +330,7 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         new TableConfigBuilder(TableType.OFFLINE).setTableName(TIERED_TABLE_NAME).setNumReplicas(NUM_REPLICAS)
             .setServerTenant(NO_TIER_NAME).build();
     // Create the table
+    addDummySchema(TIERED_TABLE_NAME);
     _helixResourceManager.addTable(tableConfig);
 
     // Add the segments
@@ -346,7 +347,7 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         _helixResourceManager.getTableIdealState(OFFLINE_TIERED_TABLE_NAME).getRecord().getMapFields();
 
     TableRebalancer tableRebalancer = new TableRebalancer(_helixManager);
-    RebalanceResult rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    RebalanceResult rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.NO_OP);
     // Segment assignment should not change
     assertEquals(rebalanceResult.getSegmentAssignment(), oldSegmentAssignment);
@@ -362,7 +363,7 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
     _helixResourceManager.createServerTenant(new Tenant(TenantRole.SERVER, TIER_B_NAME, 3, 3, 0));
 
     // rebalance is NOOP and no change in assignment caused by new instances
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.NO_OP);
     // Segment assignment should not change
     assertEquals(rebalanceResult.getSegmentAssignment(), oldSegmentAssignment);
@@ -380,7 +381,7 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
     _helixResourceManager.updateTableConfig(tableConfig);
 
     // rebalance should change assignment
-    rebalanceResult = tableRebalancer.rebalance(tableConfig, new BaseConfiguration());
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
     assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
 
     // check that segments have moved to tiers
@@ -403,6 +404,132 @@ public class TableRebalancerClusterStatelessTest extends ControllerTest {
         assertTrue(instance.startsWith(expectedPrefix));
       }
     }
+    _helixResourceManager.deleteOfflineTable(TIERED_TABLE_NAME);
+  }
+
+  @Test
+  public void testRebalanceWithTiersAndInstanceAssignments()
+      throws Exception {
+    int numServers = 3;
+    for (int i = 0; i < numServers; i++) {
+      addFakeServerInstanceToAutoJoinHelixCluster(
+          "replicaAssignment" + NO_TIER_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + i, false);
+    }
+    _helixResourceManager.createServerTenant(
+        new Tenant(TenantRole.SERVER, "replicaAssignment" + NO_TIER_NAME, numServers, numServers, 0));
+
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(TIERED_TABLE_NAME).setNumReplicas(NUM_REPLICAS)
+            .setServerTenant("replicaAssignment" + NO_TIER_NAME).build();
+    // Create the table
+    addDummySchema(TIERED_TABLE_NAME);
+    _helixResourceManager.addTable(tableConfig);
+
+    // Add the segments
+    int numSegments = 10;
+    long nowInDays = TimeUnit.MILLISECONDS.toDays(System.currentTimeMillis());
+
+    for (int i = 0; i < numSegments; i++) {
+      _helixResourceManager.addNewSegment(OFFLINE_TIERED_TABLE_NAME,
+          SegmentMetadataMockUtils.mockSegmentMetadataWithEndTimeInfo(TIERED_TABLE_NAME, SEGMENT_NAME_PREFIX + i,
+              nowInDays), null);
+    }
+    Map<String, Map<String, String>> oldSegmentAssignment =
+        _helixResourceManager.getTableIdealState(OFFLINE_TIERED_TABLE_NAME).getRecord().getMapFields();
+
+    TableRebalancer tableRebalancer = new TableRebalancer(_helixManager);
+    RebalanceResult rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
+    assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.NO_OP);
+    // Segment assignment should not change
+    assertEquals(rebalanceResult.getSegmentAssignment(), oldSegmentAssignment);
+
+    // add 6 nodes tierA
+    for (int i = 0; i < 6; i++) {
+      addFakeServerInstanceToAutoJoinHelixCluster(
+          "replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + i, false);
+    }
+    _helixResourceManager.createServerTenant(new Tenant(TenantRole.SERVER, "replicaAssignment" + TIER_A_NAME, 6, 6, 0));
+    // rebalance is NOOP and no change in assignment caused by new instances
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
+    assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.NO_OP);
+    // Segment assignment should not change
+    assertEquals(rebalanceResult.getSegmentAssignment(), oldSegmentAssignment);
+
+    // add tier config
+    tableConfig.setTierConfigsList(Lists.newArrayList(
+        new TierConfig(TIER_A_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "0d", null,
+            TierFactory.PINOT_SERVER_STORAGE_TYPE, "replicaAssignment" + TIER_A_NAME + "_OFFLINE", null, null)));
+    _helixResourceManager.updateTableConfig(tableConfig);
+
+    // rebalance should change assignment
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
+    assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
+
+    // check that segments have moved to tier a
+    Map<String, Map<String, String>> tierSegmentAssignment = rebalanceResult.getSegmentAssignment();
+    for (Map.Entry<String, Map<String, String>> entry : tierSegmentAssignment.entrySet()) {
+      Map<String, String> instanceStateMap = entry.getValue();
+      for (String instance : instanceStateMap.keySet()) {
+        assertTrue(instance.startsWith("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX));
+      }
+    }
+
+    // Test rebalance with tier instance assignment
+    InstanceTagPoolConfig tagPoolConfig =
+        new InstanceTagPoolConfig(TagNameUtils.getOfflineTagForTenant("replicaAssignment" + TIER_A_NAME), false, 0,
+            null);
+    InstanceReplicaGroupPartitionConfig replicaGroupPartitionConfig =
+        new InstanceReplicaGroupPartitionConfig(true, 0, NUM_REPLICAS, 0, 0, 0, false, null);
+    tableConfig.setInstanceAssignmentConfigMap(Collections.singletonMap(TIER_A_NAME,
+        new InstanceAssignmentConfig(tagPoolConfig, null, replicaGroupPartitionConfig, null, false)));
+    _helixResourceManager.updateTableConfig(tableConfig);
+
+    rebalanceResult = tableRebalancer.rebalance(tableConfig, new RebalanceConfig(), null);
+    assertEquals(rebalanceResult.getStatus(), RebalanceResult.Status.DONE);
+    assertTrue(rebalanceResult.getTierInstanceAssignment().containsKey(TIER_A_NAME));
+
+    InstancePartitions instancePartitions = rebalanceResult.getTierInstanceAssignment().get(TIER_A_NAME);
+
+    // Math.abs("testTable_OFFLINE".hashCode()) % 6 = 2
+    // [i2, i3, i4, i5, i0, i1]
+    //  r0  r1  r2  r0  r1  r2
+    assertEquals(instancePartitions.getInstances(0, 0),
+        Arrays.asList("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 2,
+            "replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 5));
+    assertEquals(instancePartitions.getInstances(0, 1),
+        Arrays.asList("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 3,
+            "replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 0));
+    assertEquals(instancePartitions.getInstances(0, 2),
+        Arrays.asList("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 4,
+            "replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 1));
+
+    // The assignment are based on replica-group 0 and mirrored to all the replica-groups, so server of index 0, 1, 5
+    // should have the same segments assigned, and server of index 2, 3, 4 should have the same segments assigned, each
+    // with 5 segments
+    Map<String, Map<String, String>> newSegmentAssignment = rebalanceResult.getSegmentAssignment();
+    int numSegmentsOnServer0 = 0;
+    for (int i = 0; i < numSegments; i++) {
+      String segmentName = SEGMENT_NAME_PREFIX + i;
+      Map<String, String> instanceStateMap = newSegmentAssignment.get(segmentName);
+      assertEquals(instanceStateMap.size(), NUM_REPLICAS);
+      if (instanceStateMap.containsKey("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 0)) {
+        numSegmentsOnServer0++;
+        assertEquals(instanceStateMap.get("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 0),
+            ONLINE);
+        assertEquals(instanceStateMap.get("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 1),
+            ONLINE);
+        assertEquals(instanceStateMap.get("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 5),
+            ONLINE);
+      } else {
+        assertEquals(instanceStateMap.get("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 2),
+            ONLINE);
+        assertEquals(instanceStateMap.get("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 3),
+            ONLINE);
+        assertEquals(instanceStateMap.get("replicaAssignment" + TIER_A_NAME + "_" + SERVER_INSTANCE_ID_PREFIX + 4),
+            ONLINE);
+      }
+    }
+    assertEquals(numSegmentsOnServer0, numSegments / 2);
 
     _helixResourceManager.deleteOfflineTable(TIERED_TABLE_NAME);
   }

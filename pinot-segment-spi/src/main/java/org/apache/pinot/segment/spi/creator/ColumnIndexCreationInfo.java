@@ -43,6 +43,10 @@ public class ColumnIndexCreationInfo implements Serializable {
     _defaultNullValue = defaultNullValue;
   }
 
+  public ColumnStatistics getColumnStatistics() {
+    return _columnStatistics;
+  }
+
   public boolean isCreateDictionary() {
     return _createDictionary;
   }
@@ -109,6 +113,10 @@ public class ColumnIndexCreationInfo implements Serializable {
 
   public int getNumPartitions() {
     return _columnStatistics.getNumPartitions();
+  }
+
+  public boolean isFixedLength() {
+    return _columnStatistics.isFixedLength();
   }
 
   @Nullable

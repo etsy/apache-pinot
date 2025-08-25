@@ -20,7 +20,6 @@ package org.apache.pinot.core.operator.combine;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +35,7 @@ import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.AcquireReleaseColumnsSegmentOperator;
 import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
 import org.apache.pinot.core.operator.blocks.results.ExceptionResultsBlock;
+import org.apache.pinot.core.operator.blocks.results.MetadataResultsBlock;
 import org.apache.pinot.core.operator.blocks.results.SelectionResultsBlock;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.selection.SelectionOperatorUtils;
@@ -55,16 +55,15 @@ import org.slf4j.LoggerFactory;
  * </ul>
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
-public class MinMaxValueBasedSelectionOrderByCombineOperator extends BaseCombineOperator<SelectionResultsBlock> {
+public class MinMaxValueBasedSelectionOrderByCombineOperator
+    extends BaseSingleBlockCombineOperator<SelectionResultsBlock> {
   private static final Logger LOGGER = LoggerFactory.getLogger(MinMaxValueBasedSelectionOrderByCombineOperator.class);
 
   private static final String EXPLAIN_NAME = "COMBINE_SELECT_ORDERBY_MINMAX";
 
   // For min/max value based combine, when a thread detects that no more segment needs to be processed, it inserts this
   // special results block, which can be skipped during the merge phase
-  private static final BaseResultsBlock EMPTY_RESULTS_BLOCK =
-      new SelectionResultsBlock(new DataSchema(new String[0], new DataSchema.ColumnDataType[0]),
-          Collections.emptyList());
+  private static final BaseResultsBlock EMPTY_RESULTS_BLOCK = new MetadataResultsBlock();
 
   // Use an AtomicInteger to track the end operator id, beyond which no operator needs to be processed
   private final AtomicInteger _endOperatorId;
@@ -72,9 +71,9 @@ public class MinMaxValueBasedSelectionOrderByCombineOperator extends BaseCombine
   private final List<MinMaxValueContext> _minMaxValueContexts;
   private final AtomicReference<Comparable> _globalBoundaryValue = new AtomicReference<>();
 
-  MinMaxValueBasedSelectionOrderByCombineOperator(List<Operator> operators, QueryContext queryContext,
+  public MinMaxValueBasedSelectionOrderByCombineOperator(List<Operator> operators, QueryContext queryContext,
       ExecutorService executorService) {
-    super(operators, queryContext, executorService);
+    super(null, operators, queryContext, executorService);
     _endOperatorId = new AtomicInteger(_numOperators);
     _numRowsToKeep = queryContext.getLimit() + queryContext.getOffset();
 
@@ -146,7 +145,7 @@ public class MinMaxValueBasedSelectionOrderByCombineOperator extends BaseCombine
     Comparable threadBoundaryValue = null;
 
     int operatorId;
-    while ((operatorId = _nextOperatorId.getAndIncrement()) < _numOperators) {
+    while (_processingException.get() == null && (operatorId = _nextOperatorId.getAndIncrement()) < _numOperators) {
       if (operatorId >= _endOperatorId.get()) {
         _blockingQueue.offer(EMPTY_RESULTS_BLOCK);
         continue;
@@ -284,23 +283,21 @@ public class MinMaxValueBasedSelectionOrderByCombineOperator extends BaseCombine
         return blockToMerge;
       }
       if (mergedBlock == null) {
-        mergedBlock = convertToMergeableBlock((SelectionResultsBlock) blockToMerge);
+        mergedBlock = (SelectionResultsBlock) blockToMerge;
       } else {
         mergeResultsBlocks(mergedBlock, (SelectionResultsBlock) blockToMerge);
       }
       numBlocksMerged++;
 
       // Update the boundary value if enough rows are collected
-      PriorityQueue<Object[]> selectionResult = mergedBlock.getRowsAsPriorityQueue();
-      if (selectionResult != null && selectionResult.size() == _numRowsToKeep) {
-        assert selectionResult.peek() != null;
-        _globalBoundaryValue.set((Comparable) selectionResult.peek()[0]);
+      List<Object[]> rows = mergedBlock.getRows();
+      if (rows.size() == _numRowsToKeep) {
+        _globalBoundaryValue.set((Comparable) rows.get(_numRowsToKeep - 1)[0]);
       }
     }
     return mergedBlock;
   }
 
-  @Override
   protected void mergeResultsBlocks(SelectionResultsBlock mergedBlock, SelectionResultsBlock blockToMerge) {
     DataSchema mergedDataSchema = mergedBlock.getDataSchema();
     DataSchema dataSchemaToMerge = blockToMerge.getDataSchema();
@@ -315,18 +312,7 @@ public class MinMaxValueBasedSelectionOrderByCombineOperator extends BaseCombine
           QueryException.getException(QueryException.MERGE_RESPONSE_ERROR, errorMessage));
       return;
     }
-
-    PriorityQueue<Object[]> mergedRows = mergedBlock.getRowsAsPriorityQueue();
-    Collection<Object[]> rowsToMerge = blockToMerge.getRows();
-    assert mergedRows != null && rowsToMerge != null;
-    SelectionOperatorUtils.mergeWithOrdering(mergedRows, rowsToMerge, _numRowsToKeep);
-  }
-
-  @Override
-  protected SelectionResultsBlock convertToMergeableBlock(SelectionResultsBlock resultsBlock) {
-    // This may create a copy or return the same instance. Anyway, this operator is the owner of the
-    // value now, so it can mutate it.
-    return resultsBlock.convertToPriorityQueueBased();
+    SelectionOperatorUtils.mergeWithOrdering(mergedBlock, blockToMerge, _numRowsToKeep);
   }
 
   private static class MinMaxValueContext {

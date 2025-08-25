@@ -37,12 +37,14 @@ public class PercentileRawEstAggregationFunction
     extends BaseSingleInputAggregationFunction<QuantileDigest, SerializedQuantileDigest> {
   private final PercentileEstAggregationFunction _percentileEstAggregationFunction;
 
-  public PercentileRawEstAggregationFunction(ExpressionContext expressionContext, double percentile) {
-    this(expressionContext, new PercentileEstAggregationFunction(expressionContext, percentile));
+  public PercentileRawEstAggregationFunction(ExpressionContext expressionContext, double percentile,
+      boolean nullHandlingEnabled) {
+    this(expressionContext, new PercentileEstAggregationFunction(expressionContext, percentile, nullHandlingEnabled));
   }
 
-  public PercentileRawEstAggregationFunction(ExpressionContext expressionContext, int percentile) {
-    this(expressionContext, new PercentileEstAggregationFunction(expressionContext, percentile));
+  public PercentileRawEstAggregationFunction(ExpressionContext expressionContext, int percentile,
+      boolean nullHandlingEnabled) {
+    this(expressionContext, new PercentileEstAggregationFunction(expressionContext, percentile, nullHandlingEnabled));
   }
 
   protected PercentileRawEstAggregationFunction(ExpressionContext expression,
@@ -54,15 +56,6 @@ public class PercentileRawEstAggregationFunction
   @Override
   public AggregationFunctionType getType() {
     return AggregationFunctionType.PERCENTILERAWEST;
-  }
-
-  @Override
-  public String getColumnName() {
-    final double percentile = _percentileEstAggregationFunction._percentile;
-    final int version = _percentileEstAggregationFunction._version;
-    final String type = getType().getName();
-
-    return version == 0 ? type + (int) percentile + "_" + _expression : type + percentile + "_" + _expression;
   }
 
   @Override

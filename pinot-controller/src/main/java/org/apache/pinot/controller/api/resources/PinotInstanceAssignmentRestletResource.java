@@ -26,6 +26,7 @@ import io.swagger.annotations.Authorization;
 import io.swagger.annotations.SecurityDefinition;
 import io.swagger.annotations.SwaggerDefinition;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -42,33 +43,46 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.common.assignment.InstanceAssignmentConfigUtils;
 import org.apache.pinot.common.assignment.InstancePartitions;
 import org.apache.pinot.common.assignment.InstancePartitionsUtils;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.config.TableConfigUtils;
 import org.apache.pinot.controller.api.access.AccessType;
 import org.apache.pinot.controller.api.access.Authenticate;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.assignment.instance.InstanceAssignmentDriver;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.table.TierConfig;
 import org.apache.pinot.spi.config.table.assignment.InstancePartitionsType;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotInstanceAssignmentRestletResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotInstanceAssignmentRestletResource.class);
@@ -79,40 +93,61 @@ public class PinotInstanceAssignmentRestletResource {
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/tables/{tableName}/instancePartitions")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.GET_INSTANCE_PARTITIONS)
   @ApiOperation(value = "Get the instance partitions")
-  public Map<InstancePartitionsType, InstancePartitions> getInstancePartitions(
+  public Map<String, InstancePartitions> getInstancePartitions(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED") @QueryParam("type") @Nullable
-          InstancePartitionsType instancePartitionsType) {
-    Map<InstancePartitionsType, InstancePartitions> instancePartitionsMap = new TreeMap<>();
+      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type,
+      @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
+    Map<String, InstancePartitions> instancePartitionsMap = new TreeMap<>();
 
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
     if (tableType != TableType.REALTIME) {
-      if (instancePartitionsType == InstancePartitionsType.OFFLINE || instancePartitionsType == null) {
-        InstancePartitions offlineInstancePartitions = InstancePartitionsUtils
-            .fetchInstancePartitions(_resourceManager.getPropertyStore(),
+      if (InstancePartitionsType.OFFLINE.toString().equals(type) || type == null) {
+        InstancePartitions offlineInstancePartitions =
+            InstancePartitionsUtils.fetchInstancePartitions(_resourceManager.getPropertyStore(),
                 InstancePartitionsType.OFFLINE.getInstancePartitionsName(rawTableName));
         if (offlineInstancePartitions != null) {
-          instancePartitionsMap.put(InstancePartitionsType.OFFLINE, offlineInstancePartitions);
+          instancePartitionsMap.put(InstancePartitionsType.OFFLINE.toString(), offlineInstancePartitions);
         }
       }
     }
     if (tableType != TableType.OFFLINE) {
-      if (instancePartitionsType == InstancePartitionsType.CONSUMING || instancePartitionsType == null) {
-        InstancePartitions consumingInstancePartitions = InstancePartitionsUtils
-            .fetchInstancePartitions(_resourceManager.getPropertyStore(),
+      if (InstancePartitionsType.CONSUMING.toString().equals(type) || type == null) {
+        InstancePartitions consumingInstancePartitions =
+            InstancePartitionsUtils.fetchInstancePartitions(_resourceManager.getPropertyStore(),
                 InstancePartitionsType.CONSUMING.getInstancePartitionsName(rawTableName));
         if (consumingInstancePartitions != null) {
-          instancePartitionsMap.put(InstancePartitionsType.CONSUMING, consumingInstancePartitions);
+          instancePartitionsMap.put(InstancePartitionsType.CONSUMING.toString(), consumingInstancePartitions);
         }
       }
-      if (instancePartitionsType == InstancePartitionsType.COMPLETED || instancePartitionsType == null) {
-        InstancePartitions completedInstancePartitions = InstancePartitionsUtils
-            .fetchInstancePartitions(_resourceManager.getPropertyStore(),
+      if (InstancePartitionsType.COMPLETED.toString().equals(type) || type == null) {
+        InstancePartitions completedInstancePartitions =
+            InstancePartitionsUtils.fetchInstancePartitions(_resourceManager.getPropertyStore(),
                 InstancePartitionsType.COMPLETED.getInstancePartitionsName(rawTableName));
         if (completedInstancePartitions != null) {
-          instancePartitionsMap.put(InstancePartitionsType.COMPLETED, completedInstancePartitions);
+          instancePartitionsMap.put(InstancePartitionsType.COMPLETED.toString(), completedInstancePartitions);
+        }
+      }
+    }
+
+    List<TableConfig> tableConfigs = Arrays.asList(_resourceManager.getRealtimeTableConfig(tableName),
+        _resourceManager.getOfflineTableConfig(tableName));
+
+    for (TableConfig tableConfig : tableConfigs) {
+      if (tableConfig != null && CollectionUtils.isNotEmpty(tableConfig.getTierConfigsList())) {
+        for (TierConfig tierConfig : tableConfig.getTierConfigsList()) {
+          if (type == null || type.equals(tierConfig.getName())) {
+            InstancePartitions instancePartitions =
+                InstancePartitionsUtils.fetchInstancePartitions(_resourceManager.getPropertyStore(),
+                    InstancePartitionsUtils.getInstancePartitionsNameForTier(tableConfig.getTableName(),
+                        tierConfig.getName()));
+            if (instancePartitions != null) {
+              instancePartitionsMap.put(tierConfig.getName(), instancePartitions);
+            }
+          }
         }
       }
     }
@@ -128,24 +163,25 @@ public class PinotInstanceAssignmentRestletResource {
   @POST
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/tables/{tableName}/assignInstances")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.CREATE_INSTANCE_PARTITIONS)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Assign server instances to a table")
-  public Map<InstancePartitionsType, InstancePartitions> assignInstances(
+  public Map<String, InstancePartitions> assignInstances(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED") @QueryParam("type") @Nullable
-          InstancePartitionsType instancePartitionsType,
-      @ApiParam(value = "Whether to do dry-run") @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
-    Map<InstancePartitionsType, InstancePartitions> instancePartitionsMap = new TreeMap<>();
+      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type,
+      @ApiParam(value = "Whether to do dry-run") @DefaultValue("false") @QueryParam("dryRun") boolean dryRun,
+      @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
+    Map<String, InstancePartitions> instancePartitionsMap = new TreeMap<>();
     List<InstanceConfig> instanceConfigs = _resourceManager.getAllHelixInstanceConfigs();
 
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
-    if (tableType != TableType.REALTIME && (instancePartitionsType == InstancePartitionsType.OFFLINE
-        || instancePartitionsType == null)) {
+    if (tableType != TableType.REALTIME && (InstancePartitionsType.OFFLINE.toString().equals(type) || type == null)) {
       TableConfig offlineTableConfig = _resourceManager.getOfflineTableConfig(tableName);
       if (offlineTableConfig != null) {
         try {
-          if (InstanceAssignmentConfigUtils
-              .allowInstanceAssignment(offlineTableConfig, InstancePartitionsType.OFFLINE)) {
+          if (InstanceAssignmentConfigUtils.allowInstanceAssignment(offlineTableConfig,
+              InstancePartitionsType.OFFLINE)) {
             assignInstancesForInstancePartitionsType(instancePartitionsMap, offlineTableConfig, instanceConfigs,
                 InstancePartitionsType.OFFLINE);
           }
@@ -158,20 +194,20 @@ public class PinotInstanceAssignmentRestletResource {
         }
       }
     }
-    if (tableType != TableType.OFFLINE && instancePartitionsType != InstancePartitionsType.OFFLINE) {
+    if (tableType != TableType.OFFLINE && !InstancePartitionsType.OFFLINE.toString().equals(type)) {
       TableConfig realtimeTableConfig = _resourceManager.getRealtimeTableConfig(tableName);
       if (realtimeTableConfig != null) {
         try {
-          if (instancePartitionsType == InstancePartitionsType.CONSUMING || instancePartitionsType == null) {
-            if (InstanceAssignmentConfigUtils
-                .allowInstanceAssignment(realtimeTableConfig, InstancePartitionsType.CONSUMING)) {
+          if (InstancePartitionsType.CONSUMING.toString().equals(type) || type == null) {
+            if (InstanceAssignmentConfigUtils.allowInstanceAssignment(realtimeTableConfig,
+                InstancePartitionsType.CONSUMING)) {
               assignInstancesForInstancePartitionsType(instancePartitionsMap, realtimeTableConfig, instanceConfigs,
                   InstancePartitionsType.CONSUMING);
             }
           }
-          if (instancePartitionsType == InstancePartitionsType.COMPLETED || instancePartitionsType == null) {
-            if (InstanceAssignmentConfigUtils
-                .allowInstanceAssignment(realtimeTableConfig, InstancePartitionsType.COMPLETED)) {
+          if (InstancePartitionsType.COMPLETED.toString().equals(type) || type == null) {
+            if (InstanceAssignmentConfigUtils.allowInstanceAssignment(realtimeTableConfig,
+                InstancePartitionsType.COMPLETED)) {
               assignInstancesForInstancePartitionsType(instancePartitionsMap, realtimeTableConfig, instanceConfigs,
                   InstancePartitionsType.COMPLETED);
             }
@@ -184,6 +220,16 @@ public class PinotInstanceAssignmentRestletResource {
               Response.Status.INTERNAL_SERVER_ERROR, e);
         }
       }
+    }
+
+    TableConfig realtimeTableConfig = _resourceManager.getRealtimeTableConfig(tableName);
+    if (realtimeTableConfig != null) {
+      assignInstancesForTier(instancePartitionsMap, realtimeTableConfig, instanceConfigs, type);
+    }
+
+    TableConfig offlineTableConfig = _resourceManager.getOfflineTableConfig(tableName);
+    if (offlineTableConfig != null) {
+      assignInstancesForTier(instancePartitionsMap, offlineTableConfig, instanceConfigs, type);
     }
 
     if (instancePartitionsMap.isEmpty()) {
@@ -207,22 +253,61 @@ public class PinotInstanceAssignmentRestletResource {
    * @param instanceConfigs list of instance configs
    * @param instancePartitionsType type of instancePartitions
    */
-  private void assignInstancesForInstancePartitionsType(
-      Map<InstancePartitionsType, InstancePartitions> instancePartitionsMap, TableConfig tableConfig,
-      List<InstanceConfig> instanceConfigs, InstancePartitionsType instancePartitionsType) {
+  private void assignInstancesForInstancePartitionsType(Map<String, InstancePartitions> instancePartitionsMap,
+      TableConfig tableConfig, List<InstanceConfig> instanceConfigs, InstancePartitionsType instancePartitionsType) {
     String tableNameWithType = tableConfig.getTableName();
-    if (TableConfigUtils.hasPreConfiguredInstancePartitions(tableConfig, instancePartitionsType)) {
-      String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
-      instancePartitionsMap.put(instancePartitionsType, InstancePartitionsUtils.fetchInstancePartitionsWithRename(
-          _resourceManager.getPropertyStore(), tableConfig.getInstancePartitionsMap().get(instancePartitionsType),
-          instancePartitionsType.getInstancePartitionsName(rawTableName)));
-      return;
-    }
-    InstancePartitions existingInstancePartitions =
-        InstancePartitionsUtils.fetchInstancePartitions(_resourceManager.getHelixZkManager().getHelixPropertyStore(),
+    if (!TableConfigUtils.hasPreConfiguredInstancePartitions(tableConfig, instancePartitionsType)) {
+      InstancePartitions existingInstancePartitions =
+          InstancePartitionsUtils.fetchInstancePartitions(_resourceManager.getHelixZkManager().getHelixPropertyStore(),
+              InstancePartitionsUtils.getInstancePartitionsName(tableNameWithType, instancePartitionsType.toString()));
+      instancePartitionsMap.put(instancePartitionsType.toString(),
+          new InstanceAssignmentDriver(tableConfig).assignInstances(instancePartitionsType, instanceConfigs,
+              existingInstancePartitions));
+    } else {
+      if (InstanceAssignmentConfigUtils.isMirrorServerSetAssignment(tableConfig, instancePartitionsType)) {
+        // fetch the existing instance partitions, if the table, this is referenced in the new instance partitions
+        // generation for minimum difference
+        InstancePartitions existingInstancePartitions = InstancePartitionsUtils.fetchInstancePartitions(
+            _resourceManager.getHelixZkManager().getHelixPropertyStore(),
             InstancePartitionsUtils.getInstancePartitionsName(tableNameWithType, instancePartitionsType.toString()));
-    instancePartitionsMap.put(instancePartitionsType, new InstanceAssignmentDriver(tableConfig)
-        .assignInstances(instancePartitionsType, instanceConfigs, existingInstancePartitions));
+        String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
+        // fetch the pre-configured instance partitions, the renaming part is irrelevant as we are not really
+        // preserving this preConfigured, but only using it as a reference to generate the new instance partitions
+        InstancePartitions preConfigured =
+            InstancePartitionsUtils.fetchInstancePartitionsWithRename(_resourceManager.getPropertyStore(),
+                tableConfig.getInstancePartitionsMap().get(instancePartitionsType),
+                instancePartitionsType.getInstancePartitionsName(rawTableName));
+        instancePartitionsMap.put(instancePartitionsType.toString(),
+            new InstanceAssignmentDriver(tableConfig).assignInstances(instancePartitionsType, instanceConfigs,
+                existingInstancePartitions, preConfigured));
+      } else {
+        String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
+        instancePartitionsMap.put(instancePartitionsType.toString(),
+            InstancePartitionsUtils.fetchInstancePartitionsWithRename(_resourceManager.getPropertyStore(),
+                tableConfig.getInstancePartitionsMap().get(instancePartitionsType),
+                instancePartitionsType.getInstancePartitionsName(rawTableName)));
+      }
+    }
+  }
+
+  private void assignInstancesForTier(Map<String, InstancePartitions> instancePartitionsMap, TableConfig tableConfig,
+      List<InstanceConfig> instanceConfigs, String tierName) {
+    if (CollectionUtils.isNotEmpty(tableConfig.getTierConfigsList())
+        && tableConfig.getInstanceAssignmentConfigMap() != null) {
+      for (TierConfig tierConfig : tableConfig.getTierConfigsList()) {
+        if ((tierConfig.getName().equals(tierName) || tierName == null)
+            && tableConfig.getInstanceAssignmentConfigMap().get(tierConfig.getName()) != null) {
+          InstancePartitions existingInstancePartitions = InstancePartitionsUtils.fetchInstancePartitions(
+              _resourceManager.getHelixZkManager().getHelixPropertyStore(),
+              InstancePartitionsUtils.getInstancePartitionsNameForTier(tableConfig.getTableName(),
+                  tierConfig.getName()));
+
+          instancePartitionsMap.put(tierConfig.getName(),
+              new InstanceAssignmentDriver(tableConfig).assignInstances(tierConfig.getName(), instanceConfigs,
+                  existingInstancePartitions, tableConfig.getInstanceAssignmentConfigMap().get(tierConfig.getName())));
+        }
+      }
+    }
   }
 
   private void persistInstancePartitionsHelper(InstancePartitions instancePartitions) {
@@ -238,10 +323,13 @@ public class PinotInstanceAssignmentRestletResource {
   @PUT
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/tables/{tableName}/instancePartitions")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.UPDATE_INSTANCE_PARTITIONS)
   @Authenticate(AccessType.UPDATE)
   @ApiOperation(value = "Create/update the instance partitions")
-  public Map<InstancePartitionsType, InstancePartitions> setInstancePartitions(
-      @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName, String instancePartitionsStr) {
+  public Map<String, InstancePartitions> setInstancePartitions(
+      @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName, String instancePartitionsStr,
+      @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     InstancePartitions instancePartitions;
     try {
       instancePartitions = JsonUtils.stringToObject(instancePartitionsStr, InstancePartitions.class);
@@ -256,17 +344,32 @@ public class PinotInstanceAssignmentRestletResource {
     if (tableType != TableType.REALTIME) {
       if (InstancePartitionsType.OFFLINE.getInstancePartitionsName(rawTableName).equals(instancePartitionsName)) {
         persistInstancePartitionsHelper(instancePartitions);
-        return Collections.singletonMap(InstancePartitionsType.OFFLINE, instancePartitions);
+        return Collections.singletonMap(InstancePartitionsType.OFFLINE.toString(), instancePartitions);
       }
     }
     if (tableType != TableType.OFFLINE) {
       if (InstancePartitionsType.CONSUMING.getInstancePartitionsName(rawTableName).equals(instancePartitionsName)) {
         persistInstancePartitionsHelper(instancePartitions);
-        return Collections.singletonMap(InstancePartitionsType.CONSUMING, instancePartitions);
+        return Collections.singletonMap(InstancePartitionsType.CONSUMING.toString(), instancePartitions);
       }
       if (InstancePartitionsType.COMPLETED.getInstancePartitionsName(rawTableName).equals(instancePartitionsName)) {
         persistInstancePartitionsHelper(instancePartitions);
-        return Collections.singletonMap(InstancePartitionsType.COMPLETED, instancePartitions);
+        return Collections.singletonMap(InstancePartitionsType.COMPLETED.toString(), instancePartitions);
+      }
+    }
+
+    List<TableConfig> tableConfigs = Arrays.asList(_resourceManager.getRealtimeTableConfig(tableName),
+        _resourceManager.getOfflineTableConfig(tableName));
+
+    for (TableConfig tableConfig : tableConfigs) {
+      if (tableConfig != null && CollectionUtils.isNotEmpty(tableConfig.getTierConfigsList())) {
+        for (TierConfig tierConfig : tableConfig.getTierConfigsList()) {
+          if (InstancePartitionsUtils.getInstancePartitionsNameForTier(tableConfig.getTableName(), tierConfig.getName())
+              .equals(instancePartitionsName)) {
+            persistInstancePartitionsHelper(instancePartitions);
+            return Collections.singletonMap(tierConfig.getName(), instancePartitions);
+          }
+        }
       }
     }
 
@@ -277,24 +380,43 @@ public class PinotInstanceAssignmentRestletResource {
   @DELETE
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/tables/{tableName}/instancePartitions")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.DELETE_INSTANCE_PARTITIONS)
   @Authenticate(AccessType.DELETE)
   @ApiOperation(value = "Remove the instance partitions")
   public SuccessResponse removeInstancePartitions(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED") @QueryParam("type") @Nullable
-          InstancePartitionsType instancePartitionsType) {
+      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable
+      String instancePartitionsType, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
-    if (tableType != TableType.REALTIME && (instancePartitionsType == InstancePartitionsType.OFFLINE
+    if (tableType != TableType.REALTIME && (InstancePartitionsType.OFFLINE.toString().equals(instancePartitionsType)
         || instancePartitionsType == null)) {
       removeInstancePartitionsHelper(InstancePartitionsType.OFFLINE.getInstancePartitionsName(rawTableName));
     }
     if (tableType != TableType.OFFLINE) {
-      if (instancePartitionsType == InstancePartitionsType.CONSUMING || instancePartitionsType == null) {
+      if (InstancePartitionsType.CONSUMING.toString().equals(instancePartitionsType)
+          || instancePartitionsType == null) {
         removeInstancePartitionsHelper(InstancePartitionsType.CONSUMING.getInstancePartitionsName(rawTableName));
       }
-      if (instancePartitionsType == InstancePartitionsType.COMPLETED || instancePartitionsType == null) {
+      if (InstancePartitionsType.COMPLETED.toString().equals(instancePartitionsType)
+          || instancePartitionsType == null) {
         removeInstancePartitionsHelper(InstancePartitionsType.COMPLETED.getInstancePartitionsName(rawTableName));
+      }
+    }
+
+    List<TableConfig> tableConfigs = Arrays.asList(_resourceManager.getRealtimeTableConfig(tableName),
+        _resourceManager.getOfflineTableConfig(tableName));
+
+    for (TableConfig tableConfig : tableConfigs) {
+      if (tableConfig != null && CollectionUtils.isNotEmpty(tableConfig.getTierConfigsList())) {
+        for (TierConfig tierConfig : tableConfig.getTierConfigsList()) {
+          if (instancePartitionsType == null || instancePartitionsType.equals(tierConfig.getName())) {
+            removeInstancePartitionsHelper(
+                InstancePartitionsUtils.getInstancePartitionsNameForTier(tableConfig.getTableName(),
+                    tierConfig.getName()));
+          }
+        }
       }
     }
     return new SuccessResponse("Instance partitions removed");
@@ -313,18 +435,17 @@ public class PinotInstanceAssignmentRestletResource {
   @POST
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/tables/{tableName}/replaceInstance")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.UPDATE_INSTANCE_PARTITIONS)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Replace an instance in the instance partitions")
-  public Map<InstancePartitionsType, InstancePartitions> replaceInstance(
+  public Map<String, InstancePartitions> replaceInstance(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED") @QueryParam("type") @Nullable
-          InstancePartitionsType instancePartitionsType,
+      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type,
       @ApiParam(value = "Old instance to be replaced", required = true) @QueryParam("oldInstanceId")
           String oldInstanceId,
       @ApiParam(value = "New instance to replace with", required = true) @QueryParam("newInstanceId")
-          String newInstanceId) {
-    Map<InstancePartitionsType, InstancePartitions> instancePartitionsMap =
-        getInstancePartitions(tableName, instancePartitionsType);
+          String newInstanceId, @Context HttpHeaders headers) {
+    Map<String, InstancePartitions> instancePartitionsMap = getInstancePartitions(tableName, type, headers);
     Iterator<InstancePartitions> iterator = instancePartitionsMap.values().iterator();
     while (iterator.hasNext()) {
       InstancePartitions instancePartitions = iterator.next();

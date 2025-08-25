@@ -38,12 +38,14 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.pinot.controller.LeadControllerManager;
 import org.apache.pinot.controller.helix.core.SegmentDeletionManager;
 import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.LocalPinotFS;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
+import org.apache.pinot.spi.ingestion.batch.spec.Constants;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.util.TestUtils;
 import org.joda.time.DateTime;
@@ -228,9 +230,11 @@ public class SegmentDeletionManagerTest {
     tempDir.deleteOnExit();
     FakeDeletionManager deletionManager = new FakeDeletionManager(
         tempDir.getAbsolutePath(), helixAdmin, propertyStore, 7);
+    LeadControllerManager leadControllerManager = mock(LeadControllerManager.class);
+    when(leadControllerManager.isLeaderForTable(anyString())).thenReturn(true);
 
     // Test delete when deleted segments directory does not exists
-    deletionManager.removeAgedDeletedSegments();
+    deletionManager.removeAgedDeletedSegments(leadControllerManager);
 
     // Create deleted directory
     String deletedDirectoryPath = tempDir + File.separator + "Deleted_Segments";
@@ -238,18 +242,18 @@ public class SegmentDeletionManagerTest {
     deletedDirectory.mkdir();
 
     // Test delete when deleted segments directory is empty
-    deletionManager.removeAgedDeletedSegments();
+    deletionManager.removeAgedDeletedSegments(leadControllerManager);
 
     // Create dummy directories and files
-    File dummyDir1 = new File(deletedDirectoryPath + File.separator + "dummy1");
+    File dummyDir1 = new File(deletedDirectoryPath + File.separator + "dummy1 %");
     dummyDir1.mkdir();
-    File dummyDir2 = new File(deletedDirectoryPath + File.separator + "dummy2");
+    File dummyDir2 = new File(deletedDirectoryPath + File.separator + "dummy2 %");
     dummyDir2.mkdir();
-    File dummyDir3 = new File(deletedDirectoryPath + File.separator + "dummy3");
+    File dummyDir3 = new File(deletedDirectoryPath + File.separator + "dummy3 %");
     dummyDir3.mkdir();
 
     // Test delete when there is no files but some directories exist
-    deletionManager.removeAgedDeletedSegments();
+    deletionManager.removeAgedDeletedSegments(leadControllerManager);
     Assert.assertEquals(dummyDir1.exists(), false);
     Assert.assertEquals(dummyDir2.exists(), false);
     Assert.assertEquals(dummyDir3.exists(), false);
@@ -261,13 +265,15 @@ public class SegmentDeletionManagerTest {
 
     // Create dummy files
     for (int i = 0; i < 3; i++) {
-      createTestFileWithAge(dummyDir1.getAbsolutePath() + File.separator + genDeletedSegmentName("file" + i, i, 1), i);
+      createTestFileWithAge(dummyDir1.getAbsolutePath() + File.separator + genDeletedSegmentName("file %" + i, i, 1),
+          i);
     }
     for (int i = 2; i < 5; i++) {
-      createTestFileWithAge(dummyDir2.getAbsolutePath() + File.separator + genDeletedSegmentName("file" + i, i, 1), i);
+      createTestFileWithAge(dummyDir2.getAbsolutePath() + File.separator + genDeletedSegmentName("file %" + i, i, 1),
+          i);
     }
     for (int i = 6; i < 9; i++) {
-      createTestFileWithAge(dummyDir3.getAbsolutePath() + File.separator + "file" + i, i);
+      createTestFileWithAge(dummyDir3.getAbsolutePath() + File.separator + "file %" + i, i);
     }
 
     // Sleep 1 second to ensure the clock moves.
@@ -279,7 +285,7 @@ public class SegmentDeletionManagerTest {
     Assert.assertEquals(dummyDir3.list().length, 3);
 
     // Try to remove files with the retention of 1 days.
-    deletionManager.removeAgedDeletedSegments();
+    deletionManager.removeAgedDeletedSegments(leadControllerManager);
 
     // Check that only 1 day retention file is remaining
     Assert.assertEquals(dummyDir1.list().length, 1);
@@ -352,6 +358,9 @@ public class SegmentDeletionManagerTest {
     tableDir.mkdir();
     for (String segmentId : segmentIds) {
       createTestFileWithAge(tableDir.getAbsolutePath() + File.separator + segmentId, 0);
+      // Create segment metadata file
+      createTestFileWithAge(
+          tableDir.getAbsolutePath() + File.separator + segmentId + Constants.METADATA_TAR_GZ_FILE_EXT, 0);
     }
   }
 

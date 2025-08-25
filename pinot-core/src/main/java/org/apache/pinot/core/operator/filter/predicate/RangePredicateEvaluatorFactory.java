@@ -22,6 +22,10 @@ import com.google.common.base.Preconditions;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import java.math.BigDecimal;
 import org.apache.pinot.common.request.context.predicate.RangePredicate;
+import org.apache.pinot.core.operator.filter.predicate.traits.DoubleRange;
+import org.apache.pinot.core.operator.filter.predicate.traits.FloatRange;
+import org.apache.pinot.core.operator.filter.predicate.traits.IntRange;
+import org.apache.pinot.core.operator.filter.predicate.traits.LongRange;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.BooleanUtils;
@@ -112,16 +116,16 @@ public class RangePredicateEvaluatorFactory {
     }
   }
 
-  public static final class SortedDictionaryBasedRangePredicateEvaluator extends BaseDictionaryBasedPredicateEvaluator {
+  public static final class SortedDictionaryBasedRangePredicateEvaluator extends BaseDictionaryBasedPredicateEvaluator
+      implements IntRange {
     final int _startDictId;
     // Exclusive
     final int _endDictId;
     final int _numMatchingDictIds;
-    int[] _matchingDictIds;
 
     SortedDictionaryBasedRangePredicateEvaluator(RangePredicate rangePredicate, Dictionary dictionary,
         DataType dataType) {
-      super(rangePredicate);
+      super(rangePredicate, dictionary);
       String lowerBound = rangePredicate.getLowerBound();
       String upperBound = rangePredicate.getUpperBound();
       boolean lowerInclusive = rangePredicate.isLowerInclusive();
@@ -156,8 +160,8 @@ public class RangePredicateEvaluatorFactory {
         }
       }
 
-      _numMatchingDictIds = _endDictId - _startDictId;
-      if (_numMatchingDictIds <= 0) {
+      _numMatchingDictIds = Integer.max(_endDictId - _startDictId, 0);
+      if (_numMatchingDictIds == 0) {
         _alwaysFalse = true;
       } else if (dictionary.length() == _numMatchingDictIds) {
         _alwaysTrue = true;
@@ -170,6 +174,46 @@ public class RangePredicateEvaluatorFactory {
 
     public int getEndDictId() {
       return _endDictId;
+    }
+
+    @Override
+    protected int[] calculateMatchingDictIds() {
+      if (_numMatchingDictIds == 0) {
+        return new int[0];
+      } else {
+        int[] matchingDictIds = new int[_numMatchingDictIds];
+        for (int i = 0; i < _numMatchingDictIds; i++) {
+          matchingDictIds[i] = _startDictId + i;
+        }
+        return matchingDictIds;
+      }
+    }
+
+    @Override
+    protected int[] calculateNonMatchingDictIds() {
+      int dictionarySize = _dictionary.length();
+      if (_numMatchingDictIds == 0) {
+        int[] nonMatchingDictIds = new int[dictionarySize];
+        for (int i = 0; i < dictionarySize; i++) {
+          nonMatchingDictIds[i] = i;
+        }
+        return nonMatchingDictIds;
+      } else {
+        int[] nonMatchingDictIds = new int[dictionarySize - _numMatchingDictIds];
+        int index = 0;
+        for (int i = 0; i < _startDictId; i++) {
+          nonMatchingDictIds[index++] = i;
+        }
+        for (int i = _endDictId; i < dictionarySize; i++) {
+          nonMatchingDictIds[index++] = i;
+        }
+        return nonMatchingDictIds;
+      }
+    }
+
+    @Override
+    public int getNumMatchingItems() {
+      return _numMatchingDictIds;
     }
 
     @Override
@@ -191,28 +235,13 @@ public class RangePredicateEvaluatorFactory {
     }
 
     @Override
-    public int getNumMatchingDictIds() {
-      return _numMatchingDictIds;
+    public int getInclusiveLowerBound() {
+      return getStartDictId();
     }
 
     @Override
-    public int[] getMatchingDictIds() {
-      if (_matchingDictIds == null) {
-        if (_numMatchingDictIds <= 0) {
-          _matchingDictIds = new int[0];
-        } else {
-          _matchingDictIds = new int[_numMatchingDictIds];
-          for (int i = 0; i < _numMatchingDictIds; i++) {
-            _matchingDictIds[i] = _startDictId + i;
-          }
-        }
-      }
-      return _matchingDictIds;
-    }
-
-    @Override
-    public int getNumMatchingItems() {
-      return Math.max(_numMatchingDictIds, 0);
+    public int getInclusiveUpperBound() {
+      return getEndDictId() - 1;
     }
   }
 
@@ -223,15 +252,13 @@ public class RangePredicateEvaluatorFactory {
     // TODO: Tune this threshold
     private static final int DICT_ID_SET_BASED_CARDINALITY_THRESHOLD = 1000;
 
-    final Dictionary _dictionary;
     final boolean _dictIdSetBased;
     final IntSet _matchingDictIdSet;
     final BaseRawValueBasedPredicateEvaluator _rawValueBasedEvaluator;
 
     UnsortedDictionaryBasedRangePredicateEvaluator(RangePredicate rangePredicate, Dictionary dictionary,
         DataType dataType) {
-      super(rangePredicate);
-      _dictionary = dictionary;
+      super(rangePredicate, dictionary);
       int cardinality = dictionary.length();
       if (cardinality < DICT_ID_SET_BASED_CARDINALITY_THRESHOLD) {
         _dictIdSetBased = true;
@@ -260,6 +287,16 @@ public class RangePredicateEvaluatorFactory {
     }
 
     @Override
+    public int[] getMatchingDictIds() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int getNumMatchingItems() {
+      return _matchingDictIdSet != null ? _matchingDictIdSet.size() : Integer.MIN_VALUE;
+    }
+
+    @Override
     public boolean applySV(int dictId) {
       if (_dictIdSetBased) {
         return _matchingDictIdSet.contains(dictId);
@@ -273,28 +310,21 @@ public class RangePredicateEvaluatorFactory {
             return _rawValueBasedEvaluator.applySV(_dictionary.getFloatValue(dictId));
           case DOUBLE:
             return _rawValueBasedEvaluator.applySV(_dictionary.getDoubleValue(dictId));
+          case BIG_DECIMAL:
+            return _rawValueBasedEvaluator.applySV(_dictionary.getBigDecimalValue(dictId));
           case STRING:
             return _rawValueBasedEvaluator.applySV(_dictionary.getStringValue(dictId));
           case BYTES:
             return _rawValueBasedEvaluator.applySV(_dictionary.getBytesValue(dictId));
           default:
-            throw new IllegalStateException();
+            throw new IllegalStateException("Unsupported value type: " + _dictionary.getValueType());
         }
       }
     }
-
-    @Override
-    public int getNumMatchingItems() {
-      return _matchingDictIdSet == null ? super.getNumMatchingItems() : _matchingDictIdSet.size();
-    }
-
-    @Override
-    public int[] getMatchingDictIds() {
-      throw new UnsupportedOperationException();
-    }
   }
 
-  public static final class IntRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class IntRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator
+      implements IntRange {
     final int _inclusiveLowerBound;
     final int _inclusiveUpperBound;
 
@@ -315,10 +345,12 @@ public class RangePredicateEvaluatorFactory {
       }
     }
 
+    @Override
     public int getInclusiveLowerBound() {
       return _inclusiveLowerBound;
     }
 
+    @Override
     public int getInclusiveUpperBound() {
       return _inclusiveUpperBound;
     }
@@ -347,7 +379,8 @@ public class RangePredicateEvaluatorFactory {
     }
   }
 
-  public static final class LongRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class LongRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator
+      implements LongRange {
     final long _inclusiveLowerBound;
     final long _inclusiveUpperBound;
 
@@ -368,10 +401,12 @@ public class RangePredicateEvaluatorFactory {
       }
     }
 
+    @Override
     public long getInclusiveLowerBound() {
       return _inclusiveLowerBound;
     }
 
+    @Override
     public long getInclusiveUpperBound() {
       return _inclusiveUpperBound;
     }
@@ -400,7 +435,8 @@ public class RangePredicateEvaluatorFactory {
     }
   }
 
-  public static final class FloatRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class FloatRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator
+      implements FloatRange {
     final float _inclusiveLowerBound;
     final float _inclusiveUpperBound;
 
@@ -421,10 +457,12 @@ public class RangePredicateEvaluatorFactory {
       }
     }
 
+    @Override
     public float getInclusiveLowerBound() {
       return _inclusiveLowerBound;
     }
 
+    @Override
     public float getInclusiveUpperBound() {
       return _inclusiveUpperBound;
     }
@@ -453,7 +491,8 @@ public class RangePredicateEvaluatorFactory {
     }
   }
 
-  public static final class DoubleRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class DoubleRawValueBasedRangePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator
+      implements DoubleRange {
     final double _inclusiveLowerBound;
     final double _inclusiveUpperBound;
 
@@ -474,10 +513,12 @@ public class RangePredicateEvaluatorFactory {
       }
     }
 
+    @Override
     public double getInclusiveLowerBound() {
       return _inclusiveLowerBound;
     }
 
+    @Override
     public double getInclusiveUpperBound() {
       return _inclusiveUpperBound;
     }

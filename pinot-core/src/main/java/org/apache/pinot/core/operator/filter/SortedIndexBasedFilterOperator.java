@@ -20,35 +20,35 @@ package org.apache.pinot.core.operator.filter;
 
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import org.apache.pinot.core.common.BlockDocIdSet;
 import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.blocks.FilterBlock;
 import org.apache.pinot.core.operator.docidsets.SortedDocIdSet;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
 import org.apache.pinot.core.operator.filter.predicate.RangePredicateEvaluatorFactory.SortedDictionaryBasedRangePredicateEvaluator;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.index.reader.SortedIndexReader;
 import org.apache.pinot.spi.utils.Pairs.IntPair;
 import org.roaringbitmap.buffer.MutableRoaringBitmap;
 
 
-public class SortedIndexBasedFilterOperator extends BaseFilterOperator {
+public class SortedIndexBasedFilterOperator extends BaseColumnFilterOperator {
   private static final String EXPLAIN_NAME = "FILTER_SORTED_INDEX";
 
   private final PredicateEvaluator _predicateEvaluator;
   private final SortedIndexReader<?> _sortedIndexReader;
-  private final int _numDocs;
 
-  SortedIndexBasedFilterOperator(PredicateEvaluator predicateEvaluator, DataSource dataSource, int numDocs) {
+  SortedIndexBasedFilterOperator(QueryContext queryContext, PredicateEvaluator predicateEvaluator,
+      DataSource dataSource, int numDocs) {
+    super(queryContext, dataSource, numDocs);
     _predicateEvaluator = predicateEvaluator;
     _sortedIndexReader = (SortedIndexReader<?>) dataSource.getInvertedIndex();
-    _numDocs = numDocs;
   }
 
   @Override
-  protected FilterBlock getNextBlock() {
+  protected BlockDocIdSet getNextBlockWithoutNullHandling() {
     // At this point, we need to create a list of matching docIdRanges.
     //
     // There are two kinds of operators:
@@ -63,7 +63,7 @@ public class SortedIndexBasedFilterOperator extends BaseFilterOperator {
       int startDocId = _sortedIndexReader.getDocIds(rangePredicateEvaluator.getStartDictId()).getLeft();
       // NOTE: End dictionary id is exclusive in OfflineDictionaryBasedRangePredicateEvaluator.
       int endDocId = _sortedIndexReader.getDocIds(rangePredicateEvaluator.getEndDictId() - 1).getRight();
-      return new FilterBlock(new SortedDocIdSet(Collections.singletonList(new IntPair(startDocId, endDocId))));
+      return new SortedDocIdSet(Collections.singletonList(new IntPair(startDocId, endDocId)));
     } else {
       boolean exclusive = _predicateEvaluator.isExclusive();
       int[] dictIds =
@@ -84,15 +84,12 @@ public class SortedIndexBasedFilterOperator extends BaseFilterOperator {
           if (lastDocId < _numDocs - 1) {
             docIdRanges.add(new IntPair(lastDocId + 1, _numDocs - 1));
           }
-          return new FilterBlock(new SortedDocIdSet(docIdRanges));
+          return new SortedDocIdSet(docIdRanges);
         } else {
-          return new FilterBlock(new SortedDocIdSet(Collections.singletonList(docIdRange)));
+          return new SortedDocIdSet(Collections.singletonList(docIdRange));
         }
       } else {
-        // Sort the dictIds in ascending order so that their respective docIdRanges are adjacent if they are adjacent
-        Arrays.sort(dictIds);
-
-        // Merge adjacent docIdRanges
+        // Merge adjacent docIdRanges (dictIds are already sorted)
         List<IntPair> docIdRanges = new ArrayList<>();
         IntPair lastDocIdRange = _sortedIndexReader.getDocIds(dictIds[0]);
         for (int i = 1; i < numDictIds; i++) {
@@ -127,7 +124,7 @@ public class SortedIndexBasedFilterOperator extends BaseFilterOperator {
           docIdRanges = invertedDocIdRanges;
         }
 
-        return new FilterBlock(new SortedDocIdSet(docIdRanges));
+        return new SortedDocIdSet(docIdRanges);
       }
     }
   }

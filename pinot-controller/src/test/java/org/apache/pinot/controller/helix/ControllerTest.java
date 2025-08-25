@@ -18,7 +18,6 @@
  */
 package org.apache.pinot.controller.helix;
 
-import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -26,14 +25,14 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
@@ -42,6 +41,7 @@ import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.ResourceConfig;
@@ -57,6 +57,7 @@ import org.apache.pinot.common.exception.HttpErrorStatusException;
 import org.apache.pinot.common.utils.SimpleHttpResponse;
 import org.apache.pinot.common.utils.ZkStarter;
 import org.apache.pinot.common.utils.config.TagNameUtils;
+import org.apache.pinot.common.utils.helix.HelixHelper;
 import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.controller.BaseControllerStarter;
 import org.apache.pinot.controller.ControllerConf;
@@ -71,24 +72,22 @@ import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.MetricFieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Helix;
-import org.apache.pinot.spi.utils.CommonConstants.Server;
 import org.apache.pinot.spi.utils.NetUtils;
 import org.apache.pinot.spi.utils.builder.ControllerRequestURLBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
+import org.apache.pinot.util.TestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.UNTAGGED_BROKER_INSTANCE;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.UNTAGGED_SERVER_INSTANCE;
-import static org.apache.pinot.spi.utils.CommonConstants.Server.DEFAULT_ADMIN_API_PORT;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.*;
 
 
 public class ControllerTest {
   public static final String LOCAL_HOST = "localhost";
-  public static final int DEFAULT_CONTROLLER_PORT = 18998;
   public static final String DEFAULT_DATA_DIR = new File(FileUtils.getTempDirectoryPath(),
       "test-controller-data-dir" + System.currentTimeMillis()).getAbsolutePath();
   public static final String DEFAULT_LOCAL_TEMP_DIR = new File(FileUtils.getTempDirectoryPath(),
@@ -103,33 +102,40 @@ public class ControllerTest {
   // NOTE: To add HLC realtime table, number of Server instances must be multiple of replicas
   public static final int DEFAULT_NUM_SERVER_INSTANCES = 4;
 
+  public static final long TIMEOUT_MS = 10_000L;
+
   /**
    * default static instance used to access all wrapped static instances.
    */
   public static final ControllerTest DEFAULT_INSTANCE = new ControllerTest();
 
+  protected static HttpClient _httpClient;
+
   protected final String _clusterName = getClass().getSimpleName();
-
-  protected static HttpClient _httpClient = null;
-
-  protected int _controllerPort;
-  protected String _controllerBaseApiUrl;
-  protected ControllerConf _controllerConfig;
-  protected ControllerRequestURLBuilder _controllerRequestURLBuilder;
-
-  protected ControllerRequestClient _controllerRequestClient = null;
-
   protected final List<HelixManager> _fakeInstanceHelixManagers = new ArrayList<>();
-  protected String _controllerDataDir;
 
-  protected BaseControllerStarter _controllerStarter;
-  protected PinotHelixResourceManager _helixResourceManager;
-  protected HelixManager _helixManager;
-  protected HelixAdmin _helixAdmin;
-  protected HelixDataAccessor _helixDataAccessor;
-  protected ZkHelixPropertyStore<ZNRecord> _propertyStore;
+  protected int _nextControllerPort = 20000;
+  protected int _nextBrokerPort = _nextControllerPort + 1000;
+  protected int _nextServerPort = _nextBrokerPort + 1000;
+  protected int _nextMinionPort = _nextServerPort + 1000;
 
   private ZkStarter.ZookeeperInstance _zookeeperInstance;
+
+  // The following fields need to be reset when stopping the controller.
+  protected BaseControllerStarter _controllerStarter;
+  protected int _controllerPort;
+  protected ControllerRequestClient _controllerRequestClient;
+
+  // The following fields are always set when controller is started. No need to reset them when stopping the controller.
+  protected ControllerConf _controllerConfig;
+  protected String _controllerBaseApiUrl;
+  protected ControllerRequestURLBuilder _controllerRequestURLBuilder;
+  protected String _controllerDataDir;
+  protected PinotHelixResourceManager _helixResourceManager;
+  protected HelixManager _helixManager;
+  protected HelixDataAccessor _helixDataAccessor;
+  protected HelixAdmin _helixAdmin;
+  protected ZkHelixPropertyStore<ZNRecord> _propertyStore;
 
   /**
    * Acquire the {@link ControllerTest} default instance that can be shared across different test cases.
@@ -201,16 +207,35 @@ public class ControllerTest {
 
   public Map<String, Object> getDefaultControllerConfiguration() {
     Map<String, Object> properties = new HashMap<>();
-
-    properties.put(ControllerConf.CONTROLLER_HOST, LOCAL_HOST);
-    properties.put(ControllerConf.CONTROLLER_PORT, NetUtils.findOpenPort(DEFAULT_CONTROLLER_PORT));
-    properties.put(ControllerConf.DATA_DIR, DEFAULT_DATA_DIR);
-    properties.put(ControllerConf.LOCAL_TEMP_DIR, DEFAULT_LOCAL_TEMP_DIR);
     properties.put(ControllerConf.ZK_STR, getZkUrl());
     properties.put(ControllerConf.HELIX_CLUSTER_NAME, getHelixClusterName());
+    properties.put(ControllerConf.CONTROLLER_HOST, LOCAL_HOST);
+    int controllerPort = NetUtils.findOpenPort(_nextControllerPort);
+    properties.put(ControllerConf.CONTROLLER_PORT, controllerPort);
+    if (_controllerPort == 0) {
+      _controllerPort = controllerPort;
+    }
+    _nextControllerPort = controllerPort + 1;
+    properties.put(ControllerConf.DATA_DIR, DEFAULT_DATA_DIR);
+    properties.put(ControllerConf.LOCAL_TEMP_DIR, DEFAULT_LOCAL_TEMP_DIR);
     // Enable groovy on the controller
     properties.put(ControllerConf.DISABLE_GROOVY, false);
+    properties.put(CommonConstants.CONFIG_OF_TIMEZONE, "UTC");
+    overrideControllerConf(properties);
     return properties;
+  }
+
+  /**
+   * Can be overridden to add more properties.
+   */
+  protected void overrideControllerConf(Map<String, Object> properties) {
+  }
+
+  /**
+   * Can be overridden to use a different implementation.
+   */
+  public BaseControllerStarter createControllerStarter() {
+    return new ControllerStarter();
   }
 
   public void startController()
@@ -220,27 +245,16 @@ public class ControllerTest {
 
   public void startController(Map<String, Object> properties)
       throws Exception {
-    Preconditions.checkState(_controllerStarter == null);
+    assertNull(_controllerStarter, "Controller is already started");
+    assertTrue(_controllerPort > 0, "Controller port is not assigned");
 
-    _controllerConfig = new ControllerConf(properties);
-
-    String controllerScheme = "http";
-    if (StringUtils.isNotBlank(_controllerConfig.getControllerVipProtocol())) {
-      controllerScheme = _controllerConfig.getControllerVipProtocol();
-    }
-
-    _controllerPort = DEFAULT_CONTROLLER_PORT;
-    if (StringUtils.isNotBlank(_controllerConfig.getControllerPort())) {
-      _controllerPort = Integer.parseInt(_controllerConfig.getControllerPort());
-    }
-
-    _controllerBaseApiUrl = controllerScheme + "://localhost:" + _controllerPort;
-    _controllerRequestURLBuilder = ControllerRequestURLBuilder.baseUrl(_controllerBaseApiUrl);
-    _controllerDataDir = _controllerConfig.getDataDir();
-
-    _controllerStarter = getControllerStarter();
+    _controllerStarter = createControllerStarter();
     _controllerStarter.init(new PinotConfiguration(properties));
     _controllerStarter.start();
+    _controllerConfig = _controllerStarter.getConfig();
+    _controllerBaseApiUrl = _controllerConfig.generateVipUrl();
+    _controllerRequestURLBuilder = ControllerRequestURLBuilder.baseUrl(_controllerBaseApiUrl);
+    _controllerDataDir = _controllerConfig.getDataDir();
     _helixResourceManager = _controllerStarter.getHelixResourceManager();
     _helixManager = _controllerStarter.getHelixControllerManager();
     _helixDataAccessor = _helixManager.getHelixDataAccessor();
@@ -270,13 +284,24 @@ public class ControllerTest {
     configAccessor.set(scope, Helix.ENABLE_CASE_INSENSITIVE_KEY, Boolean.toString(true));
     // Set hyperloglog log2m value to 12.
     configAccessor.set(scope, Helix.DEFAULT_HYPERLOGLOG_LOG2M_KEY, Integer.toString(12));
+    assertEquals(System.getProperty("user.timezone"), "UTC");
   }
 
   public void stopController() {
-    Preconditions.checkState(_controllerStarter != null);
+    assertNotNull(_controllerStarter, "Controller hasn't been started");
     _controllerStarter.stop();
     _controllerStarter = null;
+    _controllerPort = 0;
+    _controllerRequestClient = null;
     FileUtils.deleteQuietly(new File(_controllerDataDir));
+  }
+
+  public void restartController()
+      throws Exception {
+    assertNotNull(_controllerStarter, "Controller hasn't been started");
+    _controllerStarter.stop();
+    _controllerStarter = null;
+    startController(_controllerConfig.toMap());
   }
 
   public int getFakeBrokerInstanceCount() {
@@ -373,27 +398,12 @@ public class ControllerTest {
 
   public void addFakeServerInstancesToAutoJoinHelixCluster(int numInstances, boolean isSingleTenant)
       throws Exception {
-    addFakeServerInstancesToAutoJoinHelixCluster(numInstances, isSingleTenant, Server.DEFAULT_ADMIN_API_PORT);
-  }
-
-  public void addFakeServerInstancesToAutoJoinHelixCluster(int numInstances, boolean isSingleTenant, int baseAdminPort)
-      throws Exception {
     for (int i = 0; i < numInstances; i++) {
-      addFakeServerInstanceToAutoJoinHelixCluster(SERVER_INSTANCE_ID_PREFIX + i, isSingleTenant, baseAdminPort + i);
+      addFakeServerInstanceToAutoJoinHelixCluster(SERVER_INSTANCE_ID_PREFIX + i, isSingleTenant);
     }
   }
 
-  public int getFakeServerInstanceCount() {
-    return _helixAdmin.getInstancesInClusterWithTag(getHelixClusterName(), "DefaultTenant_OFFLINE").size()
-        + _helixAdmin.getInstancesInClusterWithTag(getHelixClusterName(), UNTAGGED_SERVER_INSTANCE).size();
-  }
-
   public void addFakeServerInstanceToAutoJoinHelixCluster(String instanceId, boolean isSingleTenant)
-      throws Exception {
-    addFakeServerInstanceToAutoJoinHelixCluster(instanceId, isSingleTenant, Server.DEFAULT_ADMIN_API_PORT);
-  }
-
-  public void addFakeServerInstanceToAutoJoinHelixCluster(String instanceId, boolean isSingleTenant, int adminPort)
       throws Exception {
     HelixManager helixManager =
         HelixManagerFactory.getZKHelixManager(getHelixClusterName(), instanceId, InstanceType.PARTICIPANT, getZkUrl());
@@ -410,30 +420,27 @@ public class ControllerTest {
     }
     HelixConfigScope configScope = new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.PARTICIPANT,
         getHelixClusterName()).forParticipant(instanceId).build();
-    helixAdmin.setConfig(configScope,
-        Collections.singletonMap(Helix.Instance.ADMIN_PORT_KEY, Integer.toString(adminPort)));
+    int adminPort = NetUtils.findOpenPort(_nextServerPort);
+    helixAdmin.setConfig(configScope, Map.of(Helix.Instance.ADMIN_PORT_KEY, Integer.toString(adminPort)));
+    _nextServerPort = adminPort + 1;
     _fakeInstanceHelixManagers.add(helixManager);
   }
 
   /** Add fake server instances until total number of server instances reaches maxCount */
   public void addMoreFakeServerInstancesToAutoJoinHelixCluster(int maxCount, boolean isSingleTenant)
       throws Exception {
-    addMoreFakeServerInstancesToAutoJoinHelixCluster(maxCount, isSingleTenant, DEFAULT_ADMIN_API_PORT);
-  }
-
-  /** Add fake server instances until total number of server instances reaches maxCount */
-  public void addMoreFakeServerInstancesToAutoJoinHelixCluster(int maxCount, boolean isSingleTenant, int baseAdminPort)
-      throws Exception {
-
     // get current instance count
     int currentCount = getFakeServerInstanceCount();
 
     // Add more instances if current count is less than max instance count.
-    if (currentCount < maxCount) {
-      for (int i = currentCount; i < maxCount; i++) {
-        addFakeServerInstanceToAutoJoinHelixCluster(SERVER_INSTANCE_ID_PREFIX + i, isSingleTenant, baseAdminPort + i);
-      }
+    for (int i = currentCount; i < maxCount; i++) {
+      addFakeServerInstanceToAutoJoinHelixCluster(SERVER_INSTANCE_ID_PREFIX + i, isSingleTenant);
     }
+  }
+
+  public int getFakeServerInstanceCount() {
+    return _helixAdmin.getInstancesInClusterWithTag(getHelixClusterName(), "DefaultTenant_OFFLINE").size()
+        + _helixAdmin.getInstancesInClusterWithTag(getHelixClusterName(), UNTAGGED_SERVER_INSTANCE).size();
   }
 
   public static class FakeSegmentOnlineOfflineStateModelFactory extends StateModelFactory<StateModel> {
@@ -585,6 +592,12 @@ public class ControllerTest {
     }
   }
 
+  public void stopAndDropFakeInstance(String instanceId) {
+    stopFakeInstance(instanceId);
+    TestUtils.waitForCondition(aVoid -> _helixResourceManager.dropInstance(instanceId).isSuccessful(), 60_000L,
+        "Failed to drop fake instance: " + instanceId);
+  }
+
   public static Schema createDummySchema(String tableName) {
     Schema schema = new Schema();
     schema.setSchemaName(tableName);
@@ -613,6 +626,11 @@ public class ControllerTest {
   public void addSchema(Schema schema)
       throws IOException {
     getControllerRequestClient().addSchema(schema);
+  }
+
+  public void updateSchema(Schema schema)
+      throws IOException {
+    getControllerRequestClient().updateSchema(schema);
   }
 
   public Schema getSchema(String schemaName) {
@@ -658,6 +676,16 @@ public class ControllerTest {
     getControllerRequestClient().deleteTable(TableNameBuilder.REALTIME.tableNameWithType(tableName));
   }
 
+  public void waitForEVToAppear(String tableNameWithType) {
+    TestUtils.waitForCondition(aVoid -> _helixResourceManager.getTableExternalView(tableNameWithType) != null, 60_000L,
+        "Failed to create the external view for table: " + tableNameWithType);
+  }
+
+  public void waitForEVToDisappear(String tableNameWithType) {
+    TestUtils.waitForCondition(aVoid -> _helixResourceManager.getTableExternalView(tableNameWithType) == null, 60_000L,
+        "Failed to clean up the external view for table: " + tableNameWithType);
+  }
+
   public List<String> listSegments(String tableName)
       throws IOException {
     return listSegments(tableName, null, false);
@@ -683,14 +711,14 @@ public class ControllerTest {
     return getControllerRequestClient().getTableSize(tableName);
   }
 
-  public void reloadOfflineTable(String tableName)
+  public String reloadOfflineTable(String tableName)
       throws IOException {
-    reloadOfflineTable(tableName, false);
+    return reloadOfflineTable(tableName, false);
   }
 
-  public void reloadOfflineTable(String tableName, boolean forceDownload)
+  public String reloadOfflineTable(String tableName, boolean forceDownload)
       throws IOException {
-    getControllerRequestClient().reloadTable(tableName, TableType.OFFLINE, forceDownload);
+    return getControllerRequestClient().reloadTable(tableName, TableType.OFFLINE, forceDownload);
   }
 
   public void reloadOfflineSegment(String tableName, String segmentName, boolean forceDownload)
@@ -698,9 +726,9 @@ public class ControllerTest {
     getControllerRequestClient().reloadSegment(tableName, segmentName, forceDownload);
   }
 
-  public void reloadRealtimeTable(String tableName)
+  public String reloadRealtimeTable(String tableName)
       throws IOException {
-    getControllerRequestClient().reloadTable(tableName, TableType.REALTIME, false);
+    return getControllerRequestClient().reloadTable(tableName, TableType.REALTIME, false);
   }
 
   public void createBrokerTenant(String tenantName, int numBrokers)
@@ -711,6 +739,11 @@ public class ControllerTest {
   public void updateBrokerTenant(String tenantName, int numBrokers)
       throws IOException {
     getControllerRequestClient().updateBrokerTenant(tenantName, numBrokers);
+  }
+
+  public void deleteBrokerTenant(String tenantName)
+      throws IOException {
+    getControllerRequestClient().deleteBrokerTenant(tenantName);
   }
 
   public void createServerTenant(String tenantName, int numOfflineServers, int numRealtimeServers)
@@ -752,6 +785,11 @@ public class ControllerTest {
   public static String sendGetRequestRaw(String urlString)
       throws IOException {
     return IOUtils.toString(new URL(urlString).openStream());
+  }
+
+  public static String sendPostRequest(String urlString)
+      throws IOException {
+    return sendPostRequest(urlString, null);
   }
 
   public static String sendPostRequest(String urlString, String payload)
@@ -878,6 +916,10 @@ public class ControllerTest {
     return _helixAdmin;
   }
 
+  public BaseControllerStarter getControllerStarter() {
+    return _controllerStarter;
+  }
+
   public PinotHelixResourceManager getHelixResourceManager() {
     return _helixResourceManager;
   }
@@ -896,10 +938,6 @@ public class ControllerTest {
 
   public int getControllerPort() {
     return _controllerPort;
-  }
-
-  public BaseControllerStarter getControllerStarter() {
-    return _controllerStarter == null ? new ControllerStarter() : _controllerStarter;
   }
 
   public ControllerConf getControllerConfig() {
@@ -949,12 +987,30 @@ public class ControllerTest {
   }
 
   /**
+   * Checks if the number of online instances for a given resource matches the expected num of instances or not.
+   */
+  public void checkNumOnlineInstancesFromExternalView(String resourceName, int expectedNumOnlineInstances)
+      throws InterruptedException {
+    long endTime = System.currentTimeMillis() + TIMEOUT_MS;
+    while (System.currentTimeMillis() < endTime) {
+      ExternalView resourceExternalView = DEFAULT_INSTANCE.getHelixAdmin()
+          .getResourceExternalView(DEFAULT_INSTANCE.getHelixClusterName(), resourceName);
+      Set<String> instanceSet = HelixHelper.getOnlineInstanceFromExternalView(resourceExternalView);
+      if (instanceSet.size() == expectedNumOnlineInstances) {
+        return;
+      }
+      Thread.sleep(100L);
+    }
+    fail("Failed to reach " + expectedNumOnlineInstances + " online instances for resource: " + resourceName);
+  }
+
+  /**
    * Make sure shared state is setup and valid before each test case class is run.
    */
   public void setupSharedStateAndValidate()
       throws Exception {
     if (_zookeeperInstance == null || _helixResourceManager == null) {
-      // this is expected to happen only when running a single test case outside of testNG group, i.e when test
+      // this is expected to happen only when running a single test case outside testNG group, i.e. when test
       // cases are run one at a time within IntelliJ or through maven command line. When running under a testNG
       // group, state will have already been setup by @BeforeGroups method in ControllerTestSetup.
       startSharedTestSetup();
@@ -971,7 +1027,9 @@ public class ControllerTest {
         DEFAULT_NUM_SERVER_INSTANCES);
 
     // No pre-existing tables
-    assertEquals(getHelixResourceManager().getAllTables().size(), 0);
+    assertTrue(CollectionUtils.isEmpty(getHelixResourceManager().getAllTables()));
+    // No pre-existing schemas
+    assertTrue(CollectionUtils.isEmpty(getHelixResourceManager().getSchemaNames()));
   }
 
   /**
@@ -979,19 +1037,28 @@ public class ControllerTest {
    * test functionality.
    */
   public void cleanup() {
-
-    // Delete all tables.
-    List<String> tables = getHelixResourceManager().getAllTables();
-    for (String table : tables) {
-      getHelixResourceManager().deleteOfflineTable(table);
-      getHelixResourceManager().deleteRealtimeTable(table);
+    // Delete all tables
+    List<String> tables = _helixResourceManager.getAllTables();
+    for (String tableNameWithType : tables) {
+      if (TableNameBuilder.isOfflineTableResource(tableNameWithType)) {
+        _helixResourceManager.deleteOfflineTable(tableNameWithType);
+      } else {
+        _helixResourceManager.deleteRealtimeTable(tableNameWithType);
+      }
     }
 
+    // Wait for all external views to disappear
+    Set<String> tablesWithEV = new HashSet<>(tables);
+    TestUtils.waitForCondition(aVoid -> {
+      tablesWithEV.removeIf(t -> _helixResourceManager.getTableExternalView(t) == null);
+      return tablesWithEV.isEmpty();
+    }, 60_000L, "Failed to clean up all the external views");
+
     // Delete all schemas.
-    List<String> schemaNames = getHelixResourceManager().getSchemaNames();
+    List<String> schemaNames = _helixResourceManager.getSchemaNames();
     if (CollectionUtils.isNotEmpty(schemaNames)) {
       for (String schemaName : schemaNames) {
-        getHelixResourceManager().deleteSchema(getHelixResourceManager().getSchema(schemaName));
+        getHelixResourceManager().deleteSchema(schemaName);
       }
     }
   }

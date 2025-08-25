@@ -21,8 +21,15 @@ package org.apache.pinot.core.operator.filter.predicate;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.common.request.context.predicate.EqPredicate;
+import org.apache.pinot.common.request.context.predicate.Predicate;
+import org.apache.pinot.core.operator.filter.predicate.traits.DoubleValue;
+import org.apache.pinot.core.operator.filter.predicate.traits.FloatValue;
+import org.apache.pinot.core.operator.filter.predicate.traits.IntValue;
+import org.apache.pinot.core.operator.filter.predicate.traits.LongValue;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.data.MultiValueVisitor;
+import org.apache.pinot.spi.data.SingleValueVisitor;
 import org.apache.pinot.spi.utils.BooleanUtils;
 import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.spi.utils.TimestampUtils;
@@ -55,8 +62,7 @@ public class EqualsPredicateEvaluatorFactory {
    * @param dataType Data type for the column
    * @return Raw value based EQ predicate evaluator
    */
-  public static BaseRawValueBasedPredicateEvaluator newRawValueBasedEvaluator(EqPredicate eqPredicate,
-      DataType dataType) {
+  public static EqRawPredicateEvaluator newRawValueBasedEvaluator(EqPredicate eqPredicate, DataType dataType) {
     String value = eqPredicate.getValue();
     switch (dataType) {
       case INT:
@@ -74,6 +80,7 @@ public class EqualsPredicateEvaluatorFactory {
       case TIMESTAMP:
         return new LongRawValueBasedEqPredicateEvaluator(eqPredicate, TimestampUtils.toMillisSinceEpoch(value));
       case STRING:
+      case JSON:
         return new StringRawValueBasedEqPredicateEvaluator(eqPredicate, value);
       case BYTES:
         return new BytesRawValueBasedEqPredicateEvaluator(eqPredicate, BytesUtils.toBytes(value));
@@ -82,12 +89,12 @@ public class EqualsPredicateEvaluatorFactory {
     }
   }
 
-  private static final class DictionaryBasedEqPredicateEvaluator extends BaseDictionaryBasedPredicateEvaluator {
+  private static final class DictionaryBasedEqPredicateEvaluator extends BaseDictionaryBasedPredicateEvaluator
+      implements IntValue {
     final int _matchingDictId;
-    final int[] _matchingDictIds;
 
     DictionaryBasedEqPredicateEvaluator(EqPredicate eqPredicate, Dictionary dictionary, DataType dataType) {
-      super(eqPredicate);
+      super(eqPredicate, dictionary);
       String predicateValue = PredicateUtils.getStoredValue(eqPredicate.getValue(), dataType);
       _matchingDictId = dictionary.indexOf(predicateValue);
       if (_matchingDictId >= 0) {
@@ -99,6 +106,11 @@ public class EqualsPredicateEvaluatorFactory {
         _matchingDictIds = new int[0];
         _alwaysFalse = true;
       }
+    }
+
+    @Override
+    protected int[] calculateNonMatchingDictIds() {
+      return PredicateUtils.getDictIds(_dictionary.length(), _matchingDictId);
     }
 
     @Override
@@ -125,17 +137,40 @@ public class EqualsPredicateEvaluatorFactory {
     }
 
     @Override
-    public int[] getMatchingDictIds() {
-      return _matchingDictIds;
+    public int getInt() {
+      return _matchingDictId;
     }
   }
 
-  private static final class IntRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  public static abstract class EqRawPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+    public EqRawPredicateEvaluator(Predicate predicate) {
+      super(predicate);
+    }
+
+    /**
+     * Visits the matching value of this predicate.
+     */
+    public abstract <R> R accept(SingleValueVisitor<R> visitor);
+
+    /**
+     * Visits the matching value of this predicate, which will be transformed into an array with a single value.
+     */
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return accept(visitor.asSingleValueVisitor());
+    }
+  }
+
+  private static final class IntRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator implements IntValue {
     final int _matchingValue;
 
     IntRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, int matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitInt(_matchingValue);
     }
 
     @Override
@@ -165,14 +200,30 @@ public class EqualsPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public int getInt() {
+      return _matchingValue;
+    }
   }
 
-  private static final class LongRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class LongRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator
+      implements LongValue {
     final long _matchingValue;
 
     LongRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, long matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitLong(_matchingValue);
+    }
+
+    @Override
+    public <R> R accept(MultiValueVisitor<R> visitor) {
+      return visitor.asSingleValueVisitor().visitLong(_matchingValue);
     }
 
     @Override
@@ -202,14 +253,25 @@ public class EqualsPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public long getLong() {
+      return _matchingValue;
+    }
   }
 
-  private static final class FloatRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class FloatRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator
+      implements FloatValue {
     final float _matchingValue;
 
     FloatRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, float matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitFloat(_matchingValue);
     }
 
     @Override
@@ -239,14 +301,25 @@ public class EqualsPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public float getFloat() {
+      return _matchingValue;
+    }
   }
 
-  private static final class DoubleRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class DoubleRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator
+      implements DoubleValue {
     final double _matchingValue;
 
     DoubleRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, double matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitDouble(_matchingValue);
     }
 
     @Override
@@ -276,14 +349,24 @@ public class EqualsPredicateEvaluatorFactory {
       }
       return matches;
     }
+
+    @Override
+    public double getDouble() {
+      return _matchingValue;
+    }
   }
 
-  private static final class BigDecimalRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class BigDecimalRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator {
     final BigDecimal _matchingValue;
 
     BigDecimalRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, BigDecimal matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitBigDecimal(_matchingValue);
     }
 
     @Override
@@ -302,12 +385,17 @@ public class EqualsPredicateEvaluatorFactory {
     }
   }
 
-  private static final class StringRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class StringRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator {
     final String _matchingValue;
 
     StringRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, String matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitString(_matchingValue);
     }
 
     @Override
@@ -326,12 +414,17 @@ public class EqualsPredicateEvaluatorFactory {
     }
   }
 
-  private static final class BytesRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+  private static final class BytesRawValueBasedEqPredicateEvaluator extends EqRawPredicateEvaluator {
     final byte[] _matchingValue;
 
     BytesRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, byte[] matchingValue) {
       super(eqPredicate);
       _matchingValue = matchingValue;
+    }
+
+    @Override
+    public <R> R accept(SingleValueVisitor<R> visitor) {
+      return visitor.visitBytes(_matchingValue);
     }
 
     @Override

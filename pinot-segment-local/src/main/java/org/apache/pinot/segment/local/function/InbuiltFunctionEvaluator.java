@@ -20,6 +20,7 @@ package org.apache.pinot.segment.local.function;
 
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.common.function.FunctionInfo;
@@ -54,8 +55,7 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
   private ExecutableNode planExecution(ExpressionContext expression) {
     switch (expression.getType()) {
       case LITERAL:
-        // TODO: pass literal with type into ConstantExecutionNode.
-        return new ConstantExecutionNode(expression.getLiteralString());
+        return new ConstantExecutionNode(expression.getLiteral().getValue());
       case IDENTIFIER:
         String columnName = expression.getIdentifier();
         ColumnExecutionNode columnExecutionNode = new ColumnExecutionNode(columnName, _arguments.size());
@@ -78,6 +78,13 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
           case "not":
             Preconditions.checkState(numArguments == 1, "NOT function expects 1 argument, got: %s", numArguments);
             return new NotExecutionNode(childNodes[0]);
+          case "arrayvalueconstructor":
+            Object[] values = new Object[numArguments];
+            int i = 0;
+            for (ExpressionContext literal : arguments) {
+              values[i++] = literal.getLiteral().getValue();
+            }
+            return new ArrayConstantExecutionNode(values);
           default:
             FunctionInfo functionInfo = FunctionRegistry.getFunctionInfo(functionName, numArguments);
             if (functionInfo == null) {
@@ -145,7 +152,7 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
 
     @Override
     public Object execute(GenericRow row) {
-      for (ExecutableNode executableNode :_argumentNodes) {
+      for (ExecutableNode executableNode : _argumentNodes) {
         Boolean res = (Boolean) executableNode.execute(row);
         if (res) {
           return true;
@@ -156,7 +163,7 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
 
     @Override
     public Object execute(Object[] values) {
-      for (ExecutableNode executableNode :_argumentNodes) {
+      for (ExecutableNode executableNode : _argumentNodes) {
         Boolean res = (Boolean) executableNode.execute(values);
         if (res) {
           return true;
@@ -175,7 +182,7 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
 
     @Override
     public Object execute(GenericRow row) {
-      for (ExecutableNode executableNode :_argumentNodes) {
+      for (ExecutableNode executableNode : _argumentNodes) {
         Boolean res = (Boolean) executableNode.execute(row);
         if (!res) {
           return false;
@@ -186,7 +193,7 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
 
     @Override
     public Object execute(Object[] values) {
-      for (ExecutableNode executableNode :_argumentNodes) {
+      for (ExecutableNode executableNode : _argumentNodes) {
         Boolean res = (Boolean) executableNode.execute(values);
         if (!res) {
           return false;
@@ -225,6 +232,9 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
             }
           }
         }
+        if (_functionInvoker.getMethod().isVarArgs()) {
+          return _functionInvoker.invoke(new Object[]{_arguments});
+        }
         _functionInvoker.convertTypes(_arguments);
         return _functionInvoker.invoke(_arguments);
       } catch (Exception e) {
@@ -248,6 +258,9 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
             }
           }
         }
+        if (_functionInvoker.getMethod().isVarArgs()) {
+          return _functionInvoker.invoke(new Object[]{_arguments});
+        }
         _functionInvoker.convertTypes(_arguments);
         return _functionInvoker.invoke(_arguments);
       } catch (Exception e) {
@@ -262,14 +275,14 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
   }
 
   private static class ConstantExecutionNode implements ExecutableNode {
-    final String _value;
+    final Object _value;
 
-    ConstantExecutionNode(String value) {
+    ConstantExecutionNode(Object value) {
       _value = value;
     }
 
     @Override
-    public String execute(GenericRow row) {
+    public Object execute(GenericRow row) {
       return _value;
     }
 
@@ -281,6 +294,29 @@ public class InbuiltFunctionEvaluator implements FunctionEvaluator {
     @Override
     public String toString() {
       return String.format("'%s'", _value);
+    }
+  }
+
+  private static class ArrayConstantExecutionNode implements ExecutableNode {
+    final Object[] _value;
+
+    ArrayConstantExecutionNode(Object[] value) {
+      _value = value;
+    }
+
+    @Override
+    public Object[] execute(GenericRow row) {
+      return _value;
+    }
+
+    @Override
+    public Object[] execute(Object[] values) {
+      return _value;
+    }
+
+    @Override
+    public String toString() {
+      return String.format("'%s'", Arrays.toString(_value));
     }
   }
 

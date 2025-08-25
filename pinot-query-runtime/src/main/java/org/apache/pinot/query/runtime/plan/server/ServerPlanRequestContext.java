@@ -18,50 +18,78 @@
  */
 package org.apache.pinot.query.runtime.plan.server;
 
-import java.util.Map;
-import org.apache.pinot.common.request.InstanceRequest;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.request.PinotQuery;
-import org.apache.pinot.core.routing.TimeBoundaryInfo;
-import org.apache.pinot.query.mailbox.MailboxService;
-import org.apache.pinot.query.planner.StageMetadata;
-import org.apache.pinot.query.runtime.blocks.TransferableBlock;
-import org.apache.pinot.query.runtime.plan.PlanRequestContext;
-import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.core.query.executor.QueryExecutor;
+import org.apache.pinot.core.query.request.ServerQueryRequest;
+import org.apache.pinot.query.planner.plannode.PlanNode;
+import org.apache.pinot.query.routing.StagePlan;
+import org.apache.pinot.query.runtime.plan.pipeline.PipelineBreakerResult;
 
 
 /**
- * Context class for converting a {@link org.apache.pinot.query.runtime.plan.DistributedStagePlan} into
+ * Context class for converting a {@link StagePlan} into
  * {@link PinotQuery} to execute on server.
+ *
+ * On leaf-stage server node, {@link PlanNode} are split into {@link PinotQuery} part and
+ *     {@link org.apache.pinot.query.runtime.operator.OpChain} part.
  */
-public class ServerPlanRequestContext extends PlanRequestContext {
-  protected TableType _tableType;
-  protected TimeBoundaryInfo _timeBoundaryInfo;
+public class ServerPlanRequestContext {
+  private final StagePlan _stagePlan;
+  private final QueryExecutor _leafQueryExecutor;
+  private final ExecutorService _executorService;
+  @Nullable
+  private final PipelineBreakerResult _pipelineBreakerResult;
 
-  protected PinotQuery _pinotQuery;
-  protected InstanceRequest _instanceRequest;
+  private final PinotQuery _pinotQuery;
+  private PlanNode _leafStageBoundaryNode;
+  private List<ServerQueryRequest> _serverQueryRequests;
 
-  public ServerPlanRequestContext(MailboxService<TransferableBlock> mailboxService, long requestId, int stageId,
-      long timeoutMs, String hostName, int port, Map<Integer, StageMetadata> metadataMap, PinotQuery pinotQuery,
-      TableType tableType, TimeBoundaryInfo timeBoundaryInfo) {
-    super(mailboxService, requestId, stageId, timeoutMs, hostName, port, metadataMap);
-    _pinotQuery = pinotQuery;
-    _tableType = tableType;
-    _timeBoundaryInfo = timeBoundaryInfo;
+  public ServerPlanRequestContext(StagePlan stagePlan, QueryExecutor leafQueryExecutor,
+      ExecutorService executorService, @Nullable PipelineBreakerResult pipelineBreakerResult) {
+    _stagePlan = stagePlan;
+    _leafQueryExecutor = leafQueryExecutor;
+    _executorService = executorService;
+    _pipelineBreakerResult = pipelineBreakerResult;
+    _pinotQuery = new PinotQuery();
   }
 
-  public TableType getTableType() {
-    return _tableType;
+  public StagePlan getStagePlan() {
+    return _stagePlan;
+  }
+
+  public QueryExecutor getLeafQueryExecutor() {
+    return _leafQueryExecutor;
+  }
+
+  public ExecutorService getExecutorService() {
+    return _executorService;
+  }
+
+  @Nullable
+  public PipelineBreakerResult getPipelineBreakerResult() {
+    return _pipelineBreakerResult;
   }
 
   public PinotQuery getPinotQuery() {
     return _pinotQuery;
   }
 
-  public void setInstanceRequest(InstanceRequest instanceRequest) {
-    _instanceRequest = instanceRequest;
+  public PlanNode getLeafStageBoundaryNode() {
+    return _leafStageBoundaryNode;
   }
 
-  public InstanceRequest getInstanceRequest() {
-    return _instanceRequest;
+  public void setLeafStageBoundaryNode(PlanNode leafStageBoundaryNode) {
+    _leafStageBoundaryNode = leafStageBoundaryNode;
+  }
+
+  public List<ServerQueryRequest> getServerQueryRequests() {
+    return _serverQueryRequests;
+  }
+
+  public void setServerQueryRequests(List<ServerQueryRequest> serverQueryRequests) {
+    _serverQueryRequests = serverQueryRequests;
   }
 }

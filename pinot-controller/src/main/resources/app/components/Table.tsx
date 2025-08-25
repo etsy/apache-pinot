@@ -281,7 +281,7 @@ export default function CustomizedTables({
   accordionToggleObject,
   tooltipData
 }: Props) {
-  // Separate the initial and final data into two separte state variables.
+  // Separate the initial and final data into two separated state variables.
   // This way we can filter and sort the data without affecting the original data.
   // If the component receives new data, we can simply set the new data to the initial data,
   // and the filters and sorts will be applied to the new data.
@@ -333,7 +333,8 @@ export default function CustomizedTables({
         }
         return false;
       });
-      setFinalData(filteredRescords);
+      let filteredData = {...initialData, records: filteredRescords};
+      setFinalData(Utils.tableFormat(filteredData));
     }
   }, [initialData, setFinalData]);
 
@@ -341,6 +342,9 @@ export default function CustomizedTables({
     clearTimeout(timeoutId.current);
     timeoutId.current = setTimeout(() => {
       filterSearchResults(search.toLowerCase());
+      // Table.tsx currently doesn't support sorting after filtering. So for now, we just
+      // remove the visual indicator of the sorted column until users sort again.
+      setColumnClicked('')
     }, 200);
 
     return () => {
@@ -349,7 +353,7 @@ export default function CustomizedTables({
   }, [search, timeoutId, filterSearchResults]);
 
   const styleCell = (str: string) => {
-    if (str === 'Good' || str.toLowerCase() === 'online' || str.toLowerCase() === 'alive' || str.toLowerCase() === 'true') {
+    if (str.toLowerCase() === 'good' || str.toLowerCase() === 'online' || str.toLowerCase() === 'alive' || str.toLowerCase() === 'true') {
       return (
         <StyledChip
           label={str}
@@ -358,7 +362,7 @@ export default function CustomizedTables({
         />
       );
     }
-    if (str === 'Bad' || str.toLowerCase() === 'offline' || str.toLowerCase() === 'dead' || str.toLowerCase() === 'false') {
+    if (str.toLocaleLowerCase() === 'bad' || str.toLowerCase() === 'offline' || str.toLowerCase() === 'dead' || str.toLowerCase() === 'false') {
       return (
         <StyledChip
           label={str}
@@ -367,7 +371,7 @@ export default function CustomizedTables({
         />
       );
     }
-    if (str.toLowerCase() === 'consuming') {
+    if (str.toLowerCase() === 'consuming' || str.toLocaleLowerCase() === "partial" || str.toLocaleLowerCase() === "updating" ) {
       return (
         <StyledChip
           label={str}
@@ -393,6 +397,9 @@ export default function CustomizedTables({
           variant="outlined"
         />
       );
+    }
+    if (str.search('\n') !== -1) {
+      return (<pre>{str.toString()}</pre>);
     }
     return (<span>{str.toString()}</span>);
   };
@@ -530,7 +537,7 @@ export default function CustomizedTables({
                           const matches = baseURL.match(regex);
                           url = baseURL.replace(matches[0], row[matches[0].replace(/:/g, '')]);
                         }
-                        return addLinks && !idx ? (
+                        return addLinks && typeof cell === 'string' && !idx ? (
                           <StyledTableCell key={idx}>
                             <Link to={`${encodeURI(`${url}${encodeURIComponent(cell)}`)}`}>{cell}</Link>
                           </StyledTableCell>

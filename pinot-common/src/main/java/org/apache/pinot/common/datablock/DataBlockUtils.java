@@ -20,24 +20,26 @@ package org.apache.pinot.common.datablock;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.sql.Timestamp;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.utils.DataSchema;
-import org.roaringbitmap.RoaringBitmap;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 public final class DataBlockUtils {
+  private static final Logger LOGGER = LoggerFactory.getLogger(DataBlockUtils.class);
+
   private DataBlockUtils() {
   }
 
   static final int VERSION_TYPE_SHIFT = 5;
 
   public static MetadataBlock getErrorDataBlock(Exception e) {
+    LOGGER.info("Caught exception while processing query", e);
     if (e instanceof ProcessingException) {
       return getErrorDataBlock(Collections.singletonMap(((ProcessingException) e).getErrorCode(), extractErrorMsg(e)));
     } else {
@@ -47,56 +49,50 @@ public final class DataBlockUtils {
   }
 
   private static String extractErrorMsg(Throwable t) {
-    while (t.getMessage() == null) {
+    while (t.getCause() != null && t.getMessage() == null) {
       t = t.getCause();
     }
     return t.getMessage() + "\n" + QueryException.getTruncatedStackTrace(t);
   }
 
   public static MetadataBlock getErrorDataBlock(Map<Integer, String> exceptions) {
-    MetadataBlock errorBlock = new MetadataBlock(MetadataBlock.MetadataBlockType.ERROR);
-    for (Map.Entry<Integer, String> exception : exceptions.entrySet()) {
-      errorBlock.addException(exception.getKey(), exception.getValue());
-    }
-    return errorBlock;
+    return MetadataBlock.newError(exceptions);
   }
 
-  public static MetadataBlock getEndOfStreamDataBlock() {
-    // TODO: add query statistics metadata for the block.
-    return new MetadataBlock(MetadataBlock.MetadataBlockType.EOS);
+  /**
+   * Reads an integer from the given byte buffer.
+   * <p>
+   * The returned integer contains both the version and the type of the data block.
+   * {@link #getVersion(int)} and {@link #getType(int)} can be used to extract the version and the type.
+   * @param byteBuffer byte buffer to read from. A single int will be read
+   */
+  public static int readVersionType(ByteBuffer byteBuffer) {
+    return byteBuffer.getInt();
   }
 
-  public static MetadataBlock getNoOpBlock() {
-    return new MetadataBlock(MetadataBlock.MetadataBlockType.NOOP);
+  public static int getVersion(int versionType) {
+    return versionType & ((1 << VERSION_TYPE_SHIFT) - 1);
+  }
+
+  public static DataBlock.Type getType(int versionType) {
+    return DataBlock.Type.fromOrdinal(versionType >> VERSION_TYPE_SHIFT);
   }
 
   public static DataBlock getDataBlock(ByteBuffer byteBuffer)
       throws IOException {
-    int versionType = byteBuffer.getInt();
-    int version = versionType & ((1 << VERSION_TYPE_SHIFT) - 1);
-    DataBlock.Type type = DataBlock.Type.fromOrdinal(versionType >> VERSION_TYPE_SHIFT);
+    int versionType = readVersionType(byteBuffer);
+    int version = getVersion(versionType);
+    DataBlock.Type type = getType(versionType);
     switch (type) {
       case COLUMNAR:
         return new ColumnarDataBlock(byteBuffer);
       case ROW:
         return new RowDataBlock(byteBuffer);
       case METADATA:
-        return new MetadataBlock(byteBuffer);
+        return MetadataBlock.deserialize(byteBuffer, version);
       default:
         throw new UnsupportedOperationException("Unsupported data table version: " + version + " with type: " + type);
     }
-  }
-
-  public static List<Object[]> extractRows(DataBlock dataBlock) {
-    DataSchema dataSchema = dataBlock.getDataSchema();
-    DataSchema.ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-    RoaringBitmap[] nullBitmaps = extractNullBitmaps(dataBlock);
-    int numRows = dataBlock.getNumberOfRows();
-    List<Object[]> rows = new ArrayList<>(numRows);
-    for (int rowId = 0; rowId < numRows; rowId++) {
-      rows.add(extractRowFromDataBlock(dataBlock, rowId, columnDataTypes, nullBitmaps));
-    }
-    return rows;
   }
 
   /**
@@ -111,7 +107,7 @@ public final class DataBlockUtils {
     int numColumns = columnOffsets.length;
     assert numColumns == dataSchema.size();
 
-    DataSchema.ColumnDataType[] storedColumnDataTypes = dataSchema.getStoredColumnDataTypes();
+    ColumnDataType[] storedColumnDataTypes = dataSchema.getStoredColumnDataTypes();
     int rowSizeInBytes = 0;
     for (int i = 0; i < numColumns; i++) {
       columnOffsets[i] = rowSizeInBytes;
@@ -152,7 +148,7 @@ public final class DataBlockUtils {
     int numColumns = columnSizes.length;
     assert numColumns == dataSchema.size();
 
-    DataSchema.ColumnDataType[] storedColumnDataTypes = dataSchema.getStoredColumnDataTypes();
+    ColumnDataType[] storedColumnDataTypes = dataSchema.getStoredColumnDataTypes();
     for (int i = 0; i < numColumns; i++) {
       switch (storedColumnDataTypes[i]) {
         case INT:
@@ -176,86 +172,5 @@ public final class DataBlockUtils {
           break;
       }
     }
-  }
-
-  public static RoaringBitmap[] extractNullBitmaps(DataBlock dataBlock) {
-    DataSchema dataSchema = dataBlock.getDataSchema();
-    DataSchema.ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-    int numColumns = columnDataTypes.length;
-    RoaringBitmap[] nullBitmaps = new RoaringBitmap[numColumns];
-    for (int colId = 0; colId < numColumns; colId++) {
-      nullBitmaps[colId] = dataBlock.getNullRowIds(colId);
-    }
-    return nullBitmaps;
-  }
-
-  public static Object[] extractRowFromDataBlock(DataBlock dataBlock, int rowId, DataSchema.ColumnDataType[] dataTypes,
-      RoaringBitmap[] nullBitmaps) {
-    int numColumns = nullBitmaps.length;
-    Object[] row = new Object[numColumns];
-    for (int colId = 0; colId < numColumns; colId++) {
-      RoaringBitmap nullBitmap = nullBitmaps[colId];
-      if (nullBitmap != null && nullBitmap.contains(rowId)) {
-        row[colId] = null;
-      } else {
-        switch (dataTypes[colId]) {
-          // Single-value column
-          case INT:
-            row[colId] = dataBlock.getInt(rowId, colId);
-            break;
-          case LONG:
-            row[colId] = dataBlock.getLong(rowId, colId);
-            break;
-          case FLOAT:
-            row[colId] = dataBlock.getFloat(rowId, colId);
-            break;
-          case DOUBLE:
-            row[colId] = dataBlock.getDouble(rowId, colId);
-            break;
-          case BIG_DECIMAL:
-            row[colId] = dataBlock.getBigDecimal(rowId, colId);
-            break;
-          case BOOLEAN:
-            row[colId] = DataSchema.ColumnDataType.BOOLEAN.convert(dataBlock.getInt(rowId, colId));
-            break;
-          case TIMESTAMP:
-            row[colId] = new Timestamp(dataBlock.getLong(rowId, colId));
-            break;
-          case STRING:
-            row[colId] = dataBlock.getString(rowId, colId);
-            break;
-          case BYTES:
-            row[colId] = dataBlock.getBytes(rowId, colId);
-            break;
-
-          // Multi-value column
-          case INT_ARRAY:
-            row[colId] = dataBlock.getIntArray(rowId, colId);
-            break;
-          case LONG_ARRAY:
-            row[colId] = dataBlock.getLongArray(rowId, colId);
-            break;
-          case FLOAT_ARRAY:
-            row[colId] = dataBlock.getFloatArray(rowId, colId);
-            break;
-          case DOUBLE_ARRAY:
-            row[colId] = dataBlock.getDoubleArray(rowId, colId);
-            break;
-          case STRING_ARRAY:
-            row[colId] = dataBlock.getStringArray(rowId, colId);
-            break;
-          case BOOLEAN_ARRAY:
-            row[colId] = DataSchema.ColumnDataType.BOOLEAN_ARRAY.convert(dataBlock.getIntArray(rowId, colId));
-            break;
-          case TIMESTAMP_ARRAY:
-            row[colId] = DataSchema.ColumnDataType.TIMESTAMP_ARRAY.convert(dataBlock.getLongArray(rowId, colId));
-            break;
-          default:
-            throw new IllegalStateException(
-                String.format("Unsupported data type: %s for column: %s", dataTypes[colId], colId));
-        }
-      }
-    }
-    return row;
   }
 }

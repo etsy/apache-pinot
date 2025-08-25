@@ -22,8 +22,10 @@ import java.util.List;
 import java.util.Map;
 import org.apache.helix.task.JobConfig;
 import org.apache.pinot.controller.helix.core.minion.ClusterInfoAccessor;
+import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.core.minion.PinotTaskConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.utils.CommonConstants;
 
 
 /**
@@ -53,6 +55,11 @@ public interface PinotTaskGenerator {
       throws Exception;
 
   /**
+   * Generates a list of task based on the given table configs, it also gets list of existing task configs
+   */
+  void generateTasks(List<TableConfig> tableConfigs, List<PinotTaskConfig> pinotTaskConfigs) throws Exception;
+
+  /**
    * Returns the timeout in milliseconds for each task, 3600000 (1 hour) by default.
    */
   default long getTaskTimeoutMs() {
@@ -67,8 +74,22 @@ public interface PinotTaskGenerator {
   }
 
   /**
+   * Returns the maximum number of attempts per task, 1 by default.
+   */
+  default int getMaxAttemptsPerTask() {
+    return MinionConstants.DEFAULT_MAX_ATTEMPTS_PER_TASK;
+  }
+
+  /**
    * Performs necessary cleanups (e.g. remove metrics) when the controller leadership changes.
    */
   default void nonLeaderCleanUp() {
+  }
+
+  /**
+   * Gets the minionInstanceTag for the tableConfig
+   */
+  default String getMinionInstanceTag(TableConfig tableConfig) {
+    return CommonConstants.Helix.UNTAGGED_MINION_INSTANCE;
   }
 }

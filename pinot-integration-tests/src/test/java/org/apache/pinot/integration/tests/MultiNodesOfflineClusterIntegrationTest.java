@@ -31,6 +31,8 @@ import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Broker.FailureDetector;
 import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.BrokerResourceStateModel;
 import org.apache.pinot.util.TestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
@@ -43,6 +45,7 @@ import static org.testng.Assert.fail;
  * Integration test that extends OfflineClusterIntegrationTest but start multiple brokers and servers.
  */
 public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterIntegrationTest {
+  private static final Logger LOGGER = LoggerFactory.getLogger(MultiNodesOfflineClusterIntegrationTest.class);
   private static final int NUM_BROKERS = 2;
   private static final int NUM_SERVERS = 3;
 
@@ -93,6 +96,7 @@ public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterInteg
 
     // Stop the broker
     brokerStarter.stop();
+    _brokerPorts.remove(_brokerPorts.size() - 1);
 
     // Dropping the broker should fail because it is still in the broker resource
     try {
@@ -136,30 +140,33 @@ public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterInteg
     testCountStarQuery(3, false);
     assertEquals(getCurrentCountStarResult(), expectedCountStarResult);
 
+    LOGGER.warn("Shutting down server {}", _serverStarters.get(NUM_SERVERS - 1).getInstanceId());
     // Take a server and shut down its query server to mimic a hard failure
     BaseServerStarter serverStarter = _serverStarters.get(NUM_SERVERS - 1);
-    serverStarter.getServerInstance().shutDown();
+    try {
+      serverStarter.getServerInstance().shutDown();
 
-    // First query should hit all servers and get connection refused exception
-    testCountStarQuery(NUM_SERVERS, true);
+      // First query should hit all servers and get connection refused or reset exception
+      // TODO: This is a flaky test. There is a race condition between shutDown and the query being executed.
+      testCountStarQuery(NUM_SERVERS, true);
 
-    // Second query should not hit the failed server, and should return the correct result
-    testCountStarQuery(NUM_SERVERS - 1, false);
-
-    // Restart the failed server, and it should be included in the routing again
-    serverStarter.stop();
-    serverStarter = startOneServer(NUM_SERVERS - 1);
-    _serverStarters.set(NUM_SERVERS - 1, serverStarter);
-    TestUtils.waitForCondition(aVoid -> {
-      try {
-        JsonNode queryResult = postQuery("SELECT COUNT(*) FROM mytable");
-        // Result should always be correct
-        assertEquals(queryResult.get("resultTable").get("rows").get(0).get(0).longValue(), getCountStarResult());
-        return queryResult.get("numServersQueried").intValue() == NUM_SERVERS;
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }, 10_000L, "Failed to include the restarted server into the routing");
+      // Second query should not hit the failed server, and should return the correct result
+      testCountStarQuery(NUM_SERVERS - 1, false);
+    } finally {
+      // Restart the failed server, and it should be included in the routing again
+      serverStarter = restartServer(serverStarter);
+      _serverStarters.set(NUM_SERVERS - 1, serverStarter);
+      TestUtils.waitForCondition((aVoid) -> {
+        try {
+          JsonNode queryResult = postQuery("SELECT COUNT(*) FROM mytable");
+          // Result should always be correct
+          assertEquals(queryResult.get("resultTable").get("rows").get(0).get(0).longValue(), getCountStarResult());
+          return queryResult.get("numServersQueried").intValue() == NUM_SERVERS;
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      }, 10_000L, "Failed to include the restarted server into the routing. Other tests may be affected");
+    }
   }
 
   private void testCountStarQuery(int expectedNumServersQueried, boolean exceptionExpected)
@@ -171,8 +178,12 @@ public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterInteg
       JsonNode exceptions = queryResult.get("exceptions");
       assertEquals(exceptions.size(), 2);
       JsonNode firstException = exceptions.get(0);
+      // NOTE:
+      // Only verify the error code but not the exception message because there can be different messages:
+      // - Connection refused
+      // - Connection reset
+      // - Channel is inactive
       assertEquals(firstException.get("errorCode").intValue(), QueryException.BROKER_REQUEST_SEND_ERROR_CODE);
-      assertTrue(firstException.get("message").textValue().contains("Connection refused"));
       JsonNode secondException = exceptions.get(1);
       assertEquals(secondException.get("errorCode").intValue(), QueryException.SERVER_NOT_RESPONDING_ERROR_CODE);
     } else {
@@ -181,9 +192,103 @@ public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterInteg
     }
   }
 
+  @Test
+  public void testServerReturnFinalResult()
+      throws Exception {
+    // Data is segment partitioned on DaysSinceEpoch.
+    JsonNode result = postQuery("SELECT DISTINCT_COUNT(DaysSinceEpoch) FROM mytable");
+    assertEquals(result.get("resultTable").get("rows").get(0).get(0).intValue(), 364);
+    result = postQuery("SELECT SEGMENT_PARTITIONED_DISTINCT_COUNT(DaysSinceEpoch) FROM mytable");
+    assertEquals(result.get("resultTable").get("rows").get(0).get(0).intValue(), 364);
+    result = postQuery("SET serverReturnFinalResult = true; SELECT DISTINCT_COUNT(DaysSinceEpoch) FROM mytable");
+    assertEquals(result.get("resultTable").get("rows").get(0).get(0).intValue(), 364);
+
+    // Data is not partitioned on DayOfWeek. Each segment contains all 7 unique values.
+    result = postQuery("SELECT DISTINCT_COUNT(DayOfWeek) FROM mytable");
+    assertEquals(result.get("resultTable").get("rows").get(0).get(0).intValue(), 7);
+    result = postQuery("SELECT SEGMENT_PARTITIONED_DISTINCT_COUNT(DayOfWeek) FROM mytable");
+    assertEquals(result.get("resultTable").get("rows").get(0).get(0).intValue(), 84);
+    result = postQuery("SET serverReturnFinalResult = true; SELECT DISTINCT_COUNT(DayOfWeek) FROM mytable");
+    assertEquals(result.get("resultTable").get("rows").get(0).get(0).intValue(), 21);
+
+    // Data is segment partitioned on DaysSinceEpoch.
+    result =
+        postQuery("SELECT DaysSinceEpoch, DISTINCT_COUNT(CRSArrTime) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    JsonNode row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16138);
+    assertEquals(row.get(1).intValue(), 398);
+    result = postQuery("SELECT DaysSinceEpoch, SEGMENT_PARTITIONED_DISTINCT_COUNT(CRSArrTime) FROM mytable GROUP BY 1 "
+        + "ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16138);
+    assertEquals(row.get(1).intValue(), 398);
+    result = postQuery("SET serverReturnFinalResult = true; "
+        + "SELECT DaysSinceEpoch, DISTINCT_COUNT(CRSArrTime) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16138);
+    assertEquals(row.get(1).intValue(), 398);
+    result = postQuery("SET serverReturnFinalResultKeyUnpartitioned = true; "
+        + "SELECT DaysSinceEpoch, DISTINCT_COUNT(CRSArrTime) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16138);
+    assertEquals(row.get(1).intValue(), 398);
+
+    // Data is segment partitioned on DaysSinceEpoch.
+    result =
+        postQuery("SELECT CRSArrTime, DISTINCT_COUNT(DaysSinceEpoch) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 2100);
+    assertEquals(row.get(1).intValue(), 253);
+    result = postQuery("SELECT CRSArrTime, SEGMENT_PARTITIONED_DISTINCT_COUNT(DaysSinceEpoch) FROM mytable GROUP BY 1 "
+        + "ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 2100);
+    assertEquals(row.get(1).intValue(), 253);
+    result = postQuery("SET serverReturnFinalResultKeyUnpartitioned = true; "
+        + "SELECT CRSArrTime, DISTINCT_COUNT(DaysSinceEpoch) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 2100);
+    assertEquals(row.get(1).intValue(), 253);
+    // Data is not partitioned on CRSArrTime. Using serverReturnFinalResult will give wrong result.
+    result = postQuery("SET serverReturnFinalResult = true; "
+        + "SELECT CRSArrTime, DISTINCT_COUNT(DaysSinceEpoch) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertTrue(row.get(1).intValue() < 253);
+
+    // Should fail when merging final results that cannot be merged.
+    try {
+      postQuery("SET serverReturnFinalResult = true; SELECT AVG(DaysSinceEpoch) FROM mytable");
+      fail();
+    } catch (Exception e) {
+      assertTrue(e.getMessage().contains("Cannot merge final results for function: AVG"));
+    }
+    try {
+      postQuery("SET serverReturnFinalResultKeyUnpartitioned = true; "
+          + "SELECT CRSArrTime, AVG(DaysSinceEpoch) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+      fail();
+    } catch (Exception e) {
+      assertTrue(e.getMessage().contains("Cannot merge final results for function: AVG"));
+    }
+
+    // Should not fail when group keys are partitioned because there is no need to merge final results.
+    result = postQuery("SELECT DaysSinceEpoch, AVG(CRSArrTime) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16257);
+    assertEquals(row.get(1).doubleValue(), 725560.0 / 444);
+    result = postQuery("SET serverReturnFinalResult = true; "
+        + "SELECT DaysSinceEpoch, AVG(CRSArrTime) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16257);
+    assertEquals(row.get(1).doubleValue(), 725560.0 / 444);
+    result = postQuery("SET serverReturnFinalResultKeyUnpartitioned = true; "
+        + "SELECT DaysSinceEpoch, AVG(CRSArrTime) FROM mytable GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
+    row = result.get("resultTable").get("rows").get(0);
+    assertEquals(row.get(0).intValue(), 16257);
+    assertEquals(row.get(1).doubleValue(), 725560.0 / 444);
+  }
+
   // Disabled because with multiple replicas, there is no guarantee that all replicas are reloaded
   @Test(enabled = false)
-  @Override
   public void testStarTreeTriggering() {
     // Ignored
   }
@@ -191,13 +296,12 @@ public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterInteg
   // Disabled because with multiple replicas, there is no guarantee that all replicas are reloaded
   @Test(enabled = false)
   @Override
-  public void testDefaultColumns() {
+  public void testDefaultColumns(boolean useMultiStageQueryEngineg) {
     // Ignored
   }
 
   // Disabled because with multiple replicas, there is no guarantee that all replicas are reloaded
   @Test(enabled = false)
-  @Override
   public void testBloomFilterTriggering() {
     // Ignored
   }
@@ -205,7 +309,8 @@ public class MultiNodesOfflineClusterIntegrationTest extends OfflineClusterInteg
   // Disabled because with multiple replicas, there is no guarantee that all replicas are reloaded
   @Test(enabled = false)
   @Override
-  public void testRangeIndexTriggering() {
+  public void testRangeIndexTriggering(boolean useMultiStageQueryEngine)
+      throws Exception {
     // Ignored
   }
 

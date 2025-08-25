@@ -22,14 +22,20 @@ import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import javax.annotation.Nonnull;
+import java.util.Set;
 import javax.annotation.Nullable;
-import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
+import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.pinot.segment.spi.index.startree.AggregationFunctionColumnPair;
+import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
 import org.apache.pinot.spi.env.CommonsConfigurationUtils;
 
 
@@ -81,7 +87,7 @@ public class StarTreeIndexMapUtils {
   /**
    * Key of the index map.
    */
-  public static class IndexKey {
+  public static class IndexKey implements Comparable<IndexKey> {
     public final IndexType _indexType;
     // For star-tree index, column will be null
     public final String _column;
@@ -112,6 +118,12 @@ public class StarTreeIndexMapUtils {
         return false;
       }
     }
+
+    @Override
+    public int compareTo(IndexKey other) {
+      return Comparator.comparing((IndexKey i) -> i._column, Comparator.nullsLast(Comparator.naturalOrder()))
+          .thenComparing((IndexKey i) -> i._indexType).compare(this, other);
+    }
   }
 
   /**
@@ -130,7 +142,7 @@ public class StarTreeIndexMapUtils {
     }
 
     @Override
-    public int compareTo(@Nonnull IndexValue o) {
+    public int compareTo(IndexValue o) {
       return Long.compare(_offset, o._offset);
     }
   }
@@ -138,14 +150,15 @@ public class StarTreeIndexMapUtils {
   /**
    * Stores the index maps for multiple star-trees into a file.
    */
-  public static void storeToFile(List<Map<IndexKey, IndexValue>> indexMaps, File indexMapFile) {
+  public static void storeToFile(List<List<Pair<IndexKey, IndexValue>>> indexMaps, File indexMapFile)
+      throws ConfigurationException {
     Preconditions.checkState(!indexMapFile.exists(), "Star-tree index map file already exists");
 
     PropertiesConfiguration configuration = CommonsConfigurationUtils.fromFile(indexMapFile);
     int numStarTrees = indexMaps.size();
     for (int i = 0; i < numStarTrees; i++) {
-      Map<IndexKey, IndexValue> indexMap = indexMaps.get(i);
-      for (Map.Entry<IndexKey, IndexValue> entry : indexMap.entrySet()) {
+      List<Pair<IndexKey, IndexValue>> indexMap = indexMaps.get(i);
+      for (Pair<IndexKey, IndexValue> entry : indexMap) {
         IndexKey key = entry.getKey();
         IndexValue value = entry.getValue();
         configuration.addProperty(key.getPropertyName(i, OFFSET_SUFFIX), value._offset);
@@ -158,9 +171,15 @@ public class StarTreeIndexMapUtils {
   /**
    * Loads the index maps for multiple star-trees from an input stream.
    */
-  public static List<Map<IndexKey, IndexValue>> loadFromInputStream(InputStream indexMapInputStream, int numStarTrees) {
+  public static List<Map<IndexKey, IndexValue>> loadFromInputStream(InputStream indexMapInputStream,
+      List<StarTreeV2Metadata> starTreeMetadataList)
+      throws ConfigurationException {
+    assert starTreeMetadataList != null;
+    int numStarTrees = starTreeMetadataList.size();
+    List<Set<String>> dimensionSets = new ArrayList<>(numStarTrees);
     List<Map<IndexKey, IndexValue>> indexMaps = new ArrayList<>(numStarTrees);
-    for (int i = 0; i < numStarTrees; i++) {
+    for (StarTreeV2Metadata starTreeMetadata : starTreeMetadataList) {
+      dimensionSets.add(new HashSet<>(starTreeMetadata.getDimensionsSplitOrder()));
       indexMaps.add(new HashMap<>());
     }
 
@@ -168,26 +187,32 @@ public class StarTreeIndexMapUtils {
     for (String key : CommonsConfigurationUtils.getKeys(configuration)) {
       String[] split = StringUtils.split(key, KEY_SEPARATOR);
       int starTreeId = Integer.parseInt(split[0]);
+      Set<String> dimensionSet = dimensionSets.get(starTreeId);
       Map<IndexKey, IndexValue> indexMap = indexMaps.get(starTreeId);
 
-      // Handle the case of column name containing '.'
-      String column;
       int columnSplitEndIndex = split.length - 2;
-      if (columnSplitEndIndex == 2) {
-        column = split[1];
-      } else {
-        column = StringUtils.join(split, KEY_SEPARATOR, 1, columnSplitEndIndex);
-      }
-
       IndexType indexType = IndexType.valueOf(split[columnSplitEndIndex]);
       IndexKey indexKey;
       if (indexType == IndexType.STAR_TREE) {
         indexKey = STAR_TREE_INDEX_KEY;
       } else {
+        // Handle the case of column name containing '.'
+        String column;
+        if (columnSplitEndIndex == 2) {
+          column = split[1];
+        } else {
+          column = StringUtils.join(split, KEY_SEPARATOR, 1, columnSplitEndIndex);
+        }
+        // Convert metric (function-column pair) to stored name for backward-compatibility
+        if (!dimensionSet.contains(column)) {
+          AggregationFunctionColumnPair functionColumnPair = AggregationFunctionColumnPair.fromColumnName(column);
+          column = AggregationFunctionColumnPair.resolveToStoredType(functionColumnPair).toColumnName();
+        }
         indexKey = new IndexKey(IndexType.FORWARD_INDEX, column);
       }
-      IndexValue indexValue = indexMap.computeIfAbsent(indexKey, (k) -> new IndexValue());
+
       long value = configuration.getLong(key);
+      IndexValue indexValue = indexMap.computeIfAbsent(indexKey, k -> new IndexValue());
       if (split[columnSplitEndIndex + 1].equals(OFFSET_SUFFIX)) {
         indexValue._offset = value;
       } else {

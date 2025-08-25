@@ -18,8 +18,6 @@
  */
 package org.apache.pinot.core.query.executor.sql;
 
-import com.google.common.collect.ImmutableList;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -103,20 +101,20 @@ public class SqlQueryExecutor {
           List<Object[]> rows = new ArrayList<>();
           tableToTaskIdMap.forEach((key, value) -> rows.add(new Object[]{key, value}));
           result.setResultTable(new ResultTable(statement.getResultSchema(), rows));
-        } catch (IOException e) {
-          result.setExceptions(ImmutableList.of(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e)));
+        } catch (Exception e) {
+          result.addException(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e));
         }
         break;
       case HTTP:
         try {
           result.setResultTable(new ResultTable(statement.getResultSchema(), statement.execute()));
         } catch (Exception e) {
-          result.setExceptions(ImmutableList.of(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e)));
+          result.addException(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e));
         }
         break;
       default:
-        result.setExceptions(ImmutableList.of(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR,
-            new UnsupportedOperationException("Unsupported statement - " + statement))));
+        result.addException(
+            QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, "Unsupported statement: " + statement));
         break;
     }
     return result;

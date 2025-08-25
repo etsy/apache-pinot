@@ -21,6 +21,7 @@ package org.apache.pinot.spi.data;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.google.common.base.Preconditions;
+import javax.annotation.Nullable;
 
 
 /**
@@ -38,8 +39,13 @@ public final class MetricFieldSpec extends FieldSpec {
     super(name, dataType, true);
   }
 
-  public MetricFieldSpec(String name, DataType dataType, Object defaultNullValue) {
+  public MetricFieldSpec(String name, DataType dataType, @Nullable Object defaultNullValue) {
     super(name, dataType, true, defaultNullValue);
+  }
+
+  public MetricFieldSpec(String name, DataType dataType, @Nullable Object defaultNullValue, int maxLength,
+      @Nullable MaxLengthExceedStrategy maxLengthExceedStrategy) {
+    super(name, dataType, true, maxLength, defaultNullValue, maxLengthExceedStrategy);
   }
 
   @JsonIgnore
@@ -57,6 +63,6 @@ public final class MetricFieldSpec extends FieldSpec {
   @Override
   public String toString() {
     return "< field type: METRIC, field name: " + _name + ", data type: " + _dataType + ", default null value: "
-        + _defaultNullValue + " >";
+        + _defaultNullValue + ", max length exceed strategy: " + _maxLengthExceedStrategy + " >";
   }
 }

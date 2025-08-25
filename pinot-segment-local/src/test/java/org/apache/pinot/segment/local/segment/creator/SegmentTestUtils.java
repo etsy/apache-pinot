@@ -32,11 +32,13 @@ import org.apache.avro.generic.GenericData.Record;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.Predicate;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.Predicate;
 import org.apache.pinot.plugin.inputformat.avro.AvroSchemaUtil;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
+import org.apache.pinot.spi.config.table.IndexConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
@@ -93,7 +95,8 @@ public class SegmentTestUtils {
     segmentGenSpec.setSegmentVersion(SegmentVersion.v1);
     segmentGenSpec.setTableName(tableName);
     segmentGenSpec.setOutDir(outputDir.getAbsolutePath());
-    segmentGenSpec.createInvertedIndexForAllColumns();
+    segmentGenSpec.getSchema().getAllFieldSpecs()
+        .forEach(fs -> segmentGenSpec.setIndexOn(StandardIndexes.inverted(), IndexConfig.ENABLED, fs.getName()));
     return segmentGenSpec;
   }
 

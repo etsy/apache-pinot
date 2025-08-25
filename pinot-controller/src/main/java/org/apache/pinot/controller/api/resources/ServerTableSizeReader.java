@@ -25,7 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
-import org.apache.commons.httpclient.HttpConnectionManager;
+import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.pinot.common.restlet.resources.SegmentSizeInfo;
 import org.apache.pinot.common.restlet.resources.TableSizeInfo;
 import org.apache.pinot.controller.util.CompletionServiceHelper;
@@ -42,9 +42,9 @@ public class ServerTableSizeReader {
   private static final Logger LOGGER = LoggerFactory.getLogger(ServerTableSizeReader.class);
 
   private final Executor _executor;
-  private final HttpConnectionManager _connectionManager;
+  private final HttpClientConnectionManager _connectionManager;
 
-  public ServerTableSizeReader(Executor executor, HttpConnectionManager connectionManager) {
+  public ServerTableSizeReader(Executor executor, HttpClientConnectionManager connectionManager) {
     _executor = executor;
     _connectionManager = connectionManager;
   }
@@ -66,7 +66,8 @@ public class ServerTableSizeReader {
     CompletionServiceHelper completionServiceHelper =
         new CompletionServiceHelper(_executor, _connectionManager, endpointsToServers);
     CompletionServiceHelper.CompletionServiceResponse serviceResponse =
-        completionServiceHelper.doMultiGetRequest(serverUrls, tableNameWithType, false, timeoutMs);
+        completionServiceHelper.doMultiGetRequest(serverUrls, tableNameWithType, false, timeoutMs,
+            "get segment size info from servers");
     Map<String, List<SegmentSizeInfo>> serverToSegmentSizeInfoListMap = new HashMap<>();
     int failedParses = 0;
     for (Map.Entry<String, String> streamResponse : serviceResponse._httpResponses.entrySet()) {

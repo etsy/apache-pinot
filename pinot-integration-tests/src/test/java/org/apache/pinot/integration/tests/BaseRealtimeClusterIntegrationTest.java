@@ -19,7 +19,7 @@
 package org.apache.pinot.integration.tests;
 
 import java.io.File;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
@@ -74,8 +74,14 @@ public abstract class BaseRealtimeClusterIntegrationTest extends BaseClusterInte
     // Initialize the query generator
     setUpQueryGenerator(avroFiles);
 
+    runValidationJob(600_000);
+
     // Wait for all documents loaded
     waitForAllDocsLoaded(600_000L);
+  }
+
+  protected void runValidationJob(long timeoutMs)
+      throws Exception {
   }
 
   protected void createSegmentsAndUpload(List<File> avroFile, Schema schema, TableConfig tableConfig)
@@ -90,12 +96,12 @@ public abstract class BaseRealtimeClusterIntegrationTest extends BaseClusterInte
 
   @Override
   protected List<String> getNoDictionaryColumns() {
+    List<String> noDictionaryColumns = new ArrayList<>(super.getNoDictionaryColumns());
     // Randomly set time column as no dictionary column.
-    if (new Random().nextInt(2) == 0) {
-      return Arrays.asList("ActualElapsedTime", "ArrDelay", "DepDelay", "CRSDepTime", "DaysSinceEpoch");
-    } else {
-      return super.getNoDictionaryColumns();
+    if (new Random().nextBoolean()) {
+      noDictionaryColumns.add("DaysSinceEpoch");
     }
+    return noDictionaryColumns;
   }
 
   /**
@@ -106,9 +112,10 @@ public abstract class BaseRealtimeClusterIntegrationTest extends BaseClusterInte
    * to ensure the right result is computed, wherein dictionary is not read if it is mutable
    * @throws Exception
    */
-  @Test
-  public void testDictionaryBasedQueries()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testDictionaryBasedQueries(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
 
     // Dictionary columns
     // int
@@ -142,30 +149,34 @@ public abstract class BaseRealtimeClusterIntegrationTest extends BaseClusterInte
         String.format("SELECT MAX(%s)-MIN(%s) FROM %s", column, column, getTableName()));
   }
 
-  @Test
-  public void testHardcodedQueries()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testHardcodedQueries(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
     super.testHardcodedQueries();
   }
 
-  @Test
-  @Override
-  public void testQueriesFromQueryFile()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testQueriesFromQueryFile(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
+    // Some of the hardcoded queries in the query file need to be adapted for v2 (for instance, using the arrayToMV
+    // with multi-value columns in filters / aggregations)
+    notSupportedInV2();
     super.testQueriesFromQueryFile();
   }
 
-  @Test
-  @Override
-  public void testGeneratedQueries()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testGeneratedQueries(boolean useMultiStageQueryEngine)
       throws Exception {
-    testGeneratedQueries(true, false);
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
+    testGeneratedQueries(true, useMultiStageQueryEngine);
   }
 
-  @Test
-  @Override
-  public void testQueryExceptions()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testQueryExceptions(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
     super.testQueryExceptions();
   }
 
@@ -180,7 +191,7 @@ public abstract class BaseRealtimeClusterIntegrationTest extends BaseClusterInte
   public void tearDown()
       throws Exception {
     dropRealtimeTable(getTableName());
-    cleanupTestTableDataManager(TableNameBuilder.REALTIME.tableNameWithType(getTableName()));
+    waitForTableDataManagerRemoved(TableNameBuilder.REALTIME.tableNameWithType(getTableName()));
     stopServer();
     stopBroker();
     stopController();

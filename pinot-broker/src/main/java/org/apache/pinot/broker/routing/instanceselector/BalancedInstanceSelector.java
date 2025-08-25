@@ -18,14 +18,18 @@
  */
 package org.apache.pinot.broker.routing.instanceselector;
 
+import java.time.Clock;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.broker.routing.adaptiveserverselector.AdaptiveServerSelector;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.utils.HashUtil;
-
 
 /**
  * Instance selector to balance the number of segments served by each selected server instance.
@@ -37,40 +41,71 @@ import org.apache.pinot.common.utils.HashUtil;
  *    Step1: Process seg1. Fetch server rankings. Pick the best server.
  *    Step2: Process seg2. Fetch server rankings (could have changed or not since Step 1). Pick the best server.
  *    Step3: Process seg3. Fetch server rankings (could have changed or not since Step 2). Pick the best server.
-
+ *
  * <p>If AdaptiveServerSelection is disabled, the selection algorithm will always evenly distribute the traffic to all
  * replicas of each segment, and will try to select different replica id for each segment. The algorithm is very
  * light-weight and will do best effort to balance the number of segments served by each selected server instance.
  */
 public class BalancedInstanceSelector extends BaseInstanceSelector {
 
-  public BalancedInstanceSelector(String tableNameWithType, BrokerMetrics brokerMetrics,
-      @Nullable AdaptiveServerSelector adaptiveServerSelector) {
-    super(tableNameWithType, brokerMetrics, adaptiveServerSelector);
+  public BalancedInstanceSelector(String tableNameWithType, ZkHelixPropertyStore<ZNRecord> propertyStore,
+      BrokerMetrics brokerMetrics, @Nullable AdaptiveServerSelector adaptiveServerSelector, Clock clock,
+      boolean useFixedReplica) {
+    super(tableNameWithType, propertyStore, brokerMetrics, adaptiveServerSelector, clock, useFixedReplica);
   }
 
   @Override
-  Map<String, String> select(List<String> segments, int requestId,
-      Map<String, List<String>> segmentToEnabledInstancesMap, Map<String, String> queryOptions) {
+  Pair<Map<String, String>, Map<String, String>> select(List<String> segments, int requestId,
+      SegmentStates segmentStates, Map<String, String> queryOptions) {
     Map<String, String> segmentToSelectedInstanceMap = new HashMap<>(HashUtil.getHashMapCapacity(segments.size()));
-    for (String segment : segments) {
-      List<String> enabledInstances = segmentToEnabledInstancesMap.get(segment);
-      // NOTE: enabledInstances can be null when there is no enabled instances for the segment, or the instance selector
-      // has not been updated (we update all components for routing in sequence)
-      if (enabledInstances == null) {
-        continue;
+    // No need to adjust this map per total segment numbers, as optional segments should be empty most of the time.
+    Map<String, String> optionalSegmentToInstanceMap = new HashMap<>();
+    if (_adaptiveServerSelector != null) {
+      for (String segment : segments) {
+        List<SegmentInstanceCandidate> candidates = segmentStates.getCandidates(segment);
+        // NOTE: candidates can be null when there is no enabled instances for the segment, or the instance selector has
+        // not been updated (we update all components for routing in sequence)
+        if (candidates == null) {
+          continue;
+        }
+        List<String> candidateInstances = new ArrayList<>(candidates.size());
+        for (SegmentInstanceCandidate candidate : candidates) {
+          candidateInstances.add(candidate.getInstance());
+        }
+        String selectedInstance = _adaptiveServerSelector.select(candidateInstances);
+        // This can only be offline when it is a new segment. And such segment is marked as optional segment so that
+        // broker or server can skip it upon any issue to process it.
+        if (candidates.get(candidateInstances.indexOf(selectedInstance)).isOnline()) {
+          segmentToSelectedInstanceMap.put(segment, selectedInstance);
+        } else {
+          optionalSegmentToInstanceMap.put(segment, selectedInstance);
+        }
       }
-
-      String selectedServer;
-      if (_adaptiveServerSelector != null) {
-        selectedServer = _adaptiveServerSelector.select(enabledInstances);
-      } else {
-        selectedServer = enabledInstances.get(requestId++ % enabledInstances.size());
+    } else {
+      for (String segment : segments) {
+        List<SegmentInstanceCandidate> candidates = segmentStates.getCandidates(segment);
+        // NOTE: candidates can be null when there is no enabled instances for the segment, or the instance selector has
+        // not been updated (we update all components for routing in sequence)
+        if (candidates == null) {
+          continue;
+        }
+        int selectedIdx;
+        if (isUseFixedReplica(queryOptions)) {
+          // candidates array is always sorted
+          selectedIdx = _tableNameHashForFixedReplicaRouting % candidates.size();
+        } else {
+          selectedIdx = requestId++ % candidates.size();
+        }
+        SegmentInstanceCandidate selectedCandidate = candidates.get(selectedIdx);
+        // This can only be offline when it is a new segment. And such segment is marked as optional segment so that
+        // broker or server can skip it upon any issue to process it.
+        if (selectedCandidate.isOnline()) {
+          segmentToSelectedInstanceMap.put(segment, selectedCandidate.getInstance());
+        } else {
+          optionalSegmentToInstanceMap.put(segment, selectedCandidate.getInstance());
+        }
       }
-
-      segmentToSelectedInstanceMap.put(segment, selectedServer);
     }
-
-    return segmentToSelectedInstanceMap;
+    return Pair.of(segmentToSelectedInstanceMap, optionalSegmentToInstanceMap);
   }
 }

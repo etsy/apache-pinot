@@ -30,12 +30,13 @@ import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.function.FunctionRegistry;
 import org.apache.pinot.common.metrics.ServerGauge;
 import org.apache.pinot.common.metrics.ServerMetrics;
-import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.common.utils.tls.TlsUtils;
 import org.apache.pinot.common.version.PinotVersion;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
 import org.apache.pinot.core.operator.transform.function.TransformFunction;
 import org.apache.pinot.core.operator.transform.function.TransformFunctionFactory;
 import org.apache.pinot.core.query.executor.QueryExecutor;
+import org.apache.pinot.core.query.logger.ServerQueryLogger;
 import org.apache.pinot.core.query.scheduler.QueryScheduler;
 import org.apache.pinot.core.query.scheduler.QuerySchedulerFactory;
 import org.apache.pinot.core.transport.ChannelHandlerFactory;
@@ -50,6 +51,7 @@ import org.apache.pinot.server.worker.WorkerQueryServer;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.metrics.PinotMetricUtils;
 import org.apache.pinot.spi.metrics.PinotMetricsRegistry;
+import org.apache.pinot.spi.plugin.PluginManager;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -95,14 +97,16 @@ public class ServerInstance {
 
     String instanceDataManagerClassName = serverConf.getInstanceDataManagerClassName();
     LOGGER.info("Initializing instance data manager of class: {}", instanceDataManagerClassName);
-    _instanceDataManager = (InstanceDataManager) Class.forName(instanceDataManagerClassName).newInstance();
+    _instanceDataManager = PluginManager.get().createInstance(instanceDataManagerClassName);
     _instanceDataManager.init(serverConf.getInstanceDataManagerConfig(), helixManager, _serverMetrics);
 
-    // Initialize FunctionRegistry before starting the query executor
+    // Initialize ServerQueryLogger and FunctionRegistry before starting the query executor
+    ServerQueryLogger.init(serverConf.getQueryLogMaxRate(), serverConf.getQueryLogDroppedReportMaxRate(),
+        _serverMetrics);
     FunctionRegistry.init();
     String queryExecutorClassName = serverConf.getQueryExecutorClassName();
     LOGGER.info("Initializing query executor of class: {}", queryExecutorClassName);
-    _queryExecutor = (QueryExecutor) Class.forName(queryExecutorClassName).newInstance();
+    _queryExecutor = PluginManager.get().createInstance(queryExecutorClassName);
     PinotConfiguration queryExecutorConfig = serverConf.getQueryExecutorConfig();
     _queryExecutor.init(queryExecutorConfig, _instanceDataManager, _serverMetrics);
 

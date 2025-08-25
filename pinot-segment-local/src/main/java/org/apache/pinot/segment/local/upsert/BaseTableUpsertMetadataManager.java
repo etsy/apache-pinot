@@ -19,64 +19,89 @@
 package org.apache.pinot.segment.local.upsert;
 
 import com.google.common.base.Preconditions;
+import java.io.File;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.pinot.common.metrics.ServerMetrics;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.apache.pinot.spi.config.table.HashFunction;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.UpsertConfig;
 import org.apache.pinot.spi.data.Schema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 @ThreadSafe
 public abstract class BaseTableUpsertMetadataManager implements TableUpsertMetadataManager {
+  private static final Logger LOGGER = LoggerFactory.getLogger(BaseTableUpsertMetadataManager.class);
+
   protected String _tableNameWithType;
-  protected List<String> _primaryKeyColumns;
-  protected String _comparisonColumn;
-  protected HashFunction _hashFunction;
-  protected PartialUpsertHandler _partialUpsertHandler;
-  protected boolean _enableSnapshot;
-  protected ServerMetrics _serverMetrics;
+  protected UpsertContext _context;
+  protected UpsertConfig.ConsistencyMode _consistencyMode;
 
   @Override
-  public void init(TableConfig tableConfig, Schema schema, TableDataManager tableDataManager,
-      ServerMetrics serverMetrics) {
+  public void init(TableConfig tableConfig, Schema schema, TableDataManager tableDataManager) {
     _tableNameWithType = tableConfig.getTableName();
 
     UpsertConfig upsertConfig = tableConfig.getUpsertConfig();
     Preconditions.checkArgument(upsertConfig != null && upsertConfig.getMode() != UpsertConfig.Mode.NONE,
         "Upsert must be enabled for table: %s", _tableNameWithType);
 
-    _primaryKeyColumns = schema.getPrimaryKeyColumns();
-    Preconditions.checkArgument(!CollectionUtils.isEmpty(_primaryKeyColumns),
+    List<String> primaryKeyColumns = schema.getPrimaryKeyColumns();
+    Preconditions.checkArgument(!CollectionUtils.isEmpty(primaryKeyColumns),
         "Primary key columns must be configured for upsert enabled table: %s", _tableNameWithType);
 
-    _comparisonColumn = upsertConfig.getComparisonColumn();
-    if (_comparisonColumn == null) {
-      _comparisonColumn = tableConfig.getValidationConfig().getTimeColumnName();
+    List<String> comparisonColumns = upsertConfig.getComparisonColumns();
+    if (comparisonColumns == null) {
+      comparisonColumns = Collections.singletonList(tableConfig.getValidationConfig().getTimeColumnName());
     }
 
-    _hashFunction = upsertConfig.getHashFunction();
-
+    PartialUpsertHandler partialUpsertHandler = null;
     if (upsertConfig.getMode() == UpsertConfig.Mode.PARTIAL) {
-      Map<String, UpsertConfig.Strategy> partialUpsertStrategies = upsertConfig.getPartialUpsertStrategies();
-      Preconditions.checkArgument(partialUpsertStrategies != null,
-          "Partial-upsert strategies must be configured for partial-upsert enabled table: %s", _tableNameWithType);
-      _partialUpsertHandler =
-          new PartialUpsertHandler(schema, partialUpsertStrategies, upsertConfig.getDefaultPartialUpsertStrategy(),
-              _comparisonColumn);
+      partialUpsertHandler = new PartialUpsertHandler(schema, comparisonColumns, upsertConfig);
     }
 
-    _enableSnapshot = upsertConfig.isEnableSnapshot();
+    String deleteRecordColumn = upsertConfig.getDeleteRecordColumn();
+    HashFunction hashFunction = upsertConfig.getHashFunction();
+    boolean enableSnapshot = upsertConfig.isEnableSnapshot();
+    boolean enablePreload = upsertConfig.isEnablePreload();
+    double metadataTTL = upsertConfig.getMetadataTTL();
+    double deletedKeysTTL = upsertConfig.getDeletedKeysTTL();
+    _consistencyMode = upsertConfig.getConsistencyMode();
+    if (_consistencyMode == null) {
+      _consistencyMode = UpsertConfig.ConsistencyMode.NONE;
+    }
+    long upsertViewRefreshIntervalMs = upsertConfig.getUpsertViewRefreshIntervalMs();
+    File tableIndexDir = tableDataManager.getTableDataDir();
+    _context = new UpsertContext.Builder().setTableConfig(tableConfig).setSchema(schema)
+        .setPrimaryKeyColumns(primaryKeyColumns).setComparisonColumns(comparisonColumns)
+        .setDeleteRecordColumn(deleteRecordColumn).setHashFunction(hashFunction)
+        .setPartialUpsertHandler(partialUpsertHandler).setEnableSnapshot(enableSnapshot).setEnablePreload(enablePreload)
+        .setMetadataTTL(metadataTTL).setDeletedKeysTTL(deletedKeysTTL).setConsistencyMode(_consistencyMode)
+        .setUpsertViewRefreshIntervalMs(upsertViewRefreshIntervalMs).setTableIndexDir(tableIndexDir)
+        .setTableDataManager(tableDataManager).build();
+    LOGGER.info(
+        "Initialized {} for table: {} with primary key columns: {}, comparison columns: {}, delete record column: {},"
+            + " hash function: {}, upsert mode: {}, enable snapshot: {}, enable preload: {}, metadata TTL: {},"
+            + " deleted Keys TTL: {}, consistency mode: {}, upsert view refresh interval: {}ms, table index dir: {}",
+        getClass().getSimpleName(), _tableNameWithType, primaryKeyColumns, comparisonColumns, deleteRecordColumn,
+        hashFunction, upsertConfig.getMode(), enableSnapshot, enablePreload, metadataTTL, deletedKeysTTL,
+        _consistencyMode, upsertViewRefreshIntervalMs, tableIndexDir);
 
-    _serverMetrics = serverMetrics;
+    initCustomVariables();
+  }
+
+  /**
+   * Can be overridden to initialize custom variables after other variables are set but before preload starts. This is
+   * needed because preload will load segments which might require these custom variables.
+   */
+  protected void initCustomVariables() {
   }
 
   @Override
   public UpsertConfig.Mode getUpsertMode() {
-    return _partialUpsertHandler == null ? UpsertConfig.Mode.FULL : UpsertConfig.Mode.PARTIAL;
+    return _context.getPartialUpsertHandler() == null ? UpsertConfig.Mode.FULL : UpsertConfig.Mode.PARTIAL;
   }
 }

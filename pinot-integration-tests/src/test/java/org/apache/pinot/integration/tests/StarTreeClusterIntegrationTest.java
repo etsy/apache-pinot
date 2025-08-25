@@ -24,19 +24,24 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.integration.tests.startree.SegmentInfoProvider;
 import org.apache.pinot.integration.tests.startree.StarTreeQueryGenerator;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
-import org.apache.pinot.segment.spi.index.startree.AggregationFunctionColumnPair;
+import org.apache.pinot.spi.config.table.FieldConfig.CompressionCodec;
+import org.apache.pinot.spi.config.table.StarTreeAggregationConfig;
 import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.util.TestUtils;
-import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
+
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
 
 
 /**
@@ -65,6 +70,9 @@ public class StarTreeClusterIntegrationTest extends BaseClusterIntegrationTest {
           AggregationFunctionType.SUM, AggregationFunctionType.AVG, AggregationFunctionType.MINMAXRANGE,
           AggregationFunctionType.DISTINCTCOUNTBITMAP);
   private static final int NUM_QUERIES_TO_GENERATE = 100;
+
+  private final long _randomSeed = System.currentTimeMillis();
+  private final Random _random = new Random(_randomSeed);
 
   private StarTreeQueryGenerator _starTree1QueryGenerator;
   private StarTreeQueryGenerator _starTree2QueryGenerator;
@@ -95,27 +103,26 @@ public class StarTreeClusterIntegrationTest extends BaseClusterIntegrationTest {
     Schema schema = createSchema();
     addSchema(schema);
 
-    // Randomly pick some dimensions and metrics for star-trees
-    List<String> starTree1Dimensions = new ArrayList<>(NUM_STAR_TREE_DIMENSIONS);
-    List<String> starTree2Dimensions = new ArrayList<>(NUM_STAR_TREE_DIMENSIONS);
+    // Pick fixed dimensions and metrics for the first star-tree
+    List<String> starTree1Dimensions =
+        Arrays.asList("OriginCityName", "DepTimeBlk", "LongestAddGTime", "CRSDepTime", "DivArrDelay");
+    List<String> starTree1Metrics =
+        Arrays.asList("CarrierDelay", "DepDelay", "LateAircraftDelay", "ArrivalDelayGroups", "ArrDel15");
+    int starTree1MaxLeafRecords = 10;
+
+    // Randomly pick some dimensions and metrics for the second star-tree
     List<String> allDimensions = new ArrayList<>(schema.getDimensionNames());
-    Collections.shuffle(allDimensions);
-    for (int i = 0; i < NUM_STAR_TREE_DIMENSIONS; i++) {
-      starTree1Dimensions.add(allDimensions.get(2 * i));
-      starTree2Dimensions.add(allDimensions.get(2 * i + 1));
-    }
-    List<String> starTree1Metrics = new ArrayList<>(NUM_STAR_TREE_METRICS);
-    List<String> starTree2Metrics = new ArrayList<>(NUM_STAR_TREE_METRICS);
+    Collections.shuffle(allDimensions, _random);
+    List<String> starTree2Dimensions = allDimensions.subList(0, NUM_STAR_TREE_DIMENSIONS);
     List<String> allMetrics = new ArrayList<>(schema.getMetricNames());
-    Collections.shuffle(allMetrics);
-    for (int i = 0; i < NUM_STAR_TREE_METRICS; i++) {
-      starTree1Metrics.add(allMetrics.get(2 * i));
-      starTree2Metrics.add(allMetrics.get(2 * i + 1));
-    }
+    Collections.shuffle(allMetrics, _random);
+    List<String> starTree2Metrics = allMetrics.subList(0, NUM_STAR_TREE_METRICS);
+    int starTree2MaxLeafRecords = 100;
+
     TableConfig tableConfig = createOfflineTableConfig();
     tableConfig.getIndexingConfig().setStarTreeIndexConfigs(
-        Arrays.asList(getStarTreeIndexConfig(starTree1Dimensions, starTree1Metrics),
-            getStarTreeIndexConfig(starTree2Dimensions, starTree2Metrics)));
+        Arrays.asList(getStarTreeIndexConfig(starTree1Dimensions, starTree1Metrics, starTree1MaxLeafRecords),
+            getStarTreeIndexConfig(starTree2Dimensions, starTree2Metrics, starTree2MaxLeafRecords)));
     addTableConfig(tableConfig);
 
     // Unpack the Avro files
@@ -132,62 +139,99 @@ public class StarTreeClusterIntegrationTest extends BaseClusterIntegrationTest {
       aggregationFunctions.add(functionType.getName());
     }
     _starTree1QueryGenerator = new StarTreeQueryGenerator(DEFAULT_TABLE_NAME, starTree1Dimensions, starTree1Metrics,
-        segmentInfoProvider.getSingleValueDimensionValuesMap(), aggregationFunctions);
+        segmentInfoProvider.getSingleValueDimensionValuesMap(), aggregationFunctions, _random);
     _starTree2QueryGenerator = new StarTreeQueryGenerator(DEFAULT_TABLE_NAME, starTree2Dimensions, starTree2Metrics,
-        segmentInfoProvider.getSingleValueDimensionValuesMap(), aggregationFunctions);
+        segmentInfoProvider.getSingleValueDimensionValuesMap(), aggregationFunctions, _random);
 
     // Wait for all documents loaded
     waitForAllDocsLoaded(600_000L);
   }
 
-  private static StarTreeIndexConfig getStarTreeIndexConfig(List<String> dimensions, List<String> metrics) {
-    List<String> functionColumnPairs = new ArrayList<>();
+  private static StarTreeIndexConfig getStarTreeIndexConfig(List<String> dimensions, List<String> metrics,
+      int maxLeafRecords) {
+    List<StarTreeAggregationConfig> aggregationConfigs = new ArrayList<>();
+    // Use default setting for COUNT(*) and custom setting for other aggregations for better coverage
+    aggregationConfigs.add(new StarTreeAggregationConfig("*", "COUNT"));
     for (AggregationFunctionType functionType : AGGREGATION_FUNCTION_TYPES) {
+      if (functionType == AggregationFunctionType.COUNT) {
+        continue;
+      }
       for (String metric : metrics) {
-        functionColumnPairs.add(new AggregationFunctionColumnPair(functionType, metric).toColumnName());
+        aggregationConfigs.add(
+            new StarTreeAggregationConfig(metric, functionType.name(), CompressionCodec.LZ4, false, 4, null, null));
       }
     }
-    return new StarTreeIndexConfig(dimensions, null, functionColumnPairs, 100);
+    return new StarTreeIndexConfig(dimensions, null, null, aggregationConfigs, maxLeafRecords);
   }
 
-  @Test
-  public void testGeneratedQueries()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testGeneratedQueries(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
     for (int i = 0; i < NUM_QUERIES_TO_GENERATE; i += 2) {
-      testStarQuery(_starTree1QueryGenerator.nextQuery());
-      testStarQuery(_starTree2QueryGenerator.nextQuery());
+      testStarQuery(_starTree1QueryGenerator.nextQuery(), false);
+      testStarQuery(_starTree2QueryGenerator.nextQuery(), false);
     }
   }
 
-  @Test
-  public void testPredicateOnMetrics()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testHardCodedQueries(boolean useMultiStageQueryEngine)
       throws Exception {
-    String starQuery;
-
-    // Query containing predicate on one metric only
-    starQuery = "SELECT SUM(DepDelayMinutes) FROM mytable WHERE DepDelay > 0";
-    testStarQuery(starQuery);
-    starQuery = "SELECT SUM(DepDelayMinutes) FROM mytable WHERE DepDelay BETWEEN 0 and 10000";
-    testStarQuery(starQuery);
-
-    // Query containing predicate on multiple metrics
-    starQuery = "SELECT SUM(DepDelayMinutes) FROM mytable WHERE DepDelay > 0 AND ArrDelay > 0";
-    testStarQuery(starQuery);
-
-    // Query containing predicate on multiple metrics and dimensions
-    starQuery = "SELECT SUM(DepDelayMinutes) FROM mytable WHERE DepDelay > 0 AND ArrDelay > 0 AND OriginStateName = "
-        + "'Massachusetts'";
-    testStarQuery(starQuery);
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
+    // This query can test the case of one predicate matches all the child nodes but star-node cannot be used because
+    // the predicate is included as remaining predicate from another branch
+    String starQuery = "SELECT DepTimeBlk, COUNT(*) FROM mytable "
+        + "WHERE CRSDepTime BETWEEN 1137 AND 1849 AND DivArrDelay > 218 AND CRSDepTime NOT IN (35, 1633, 1457, 140) "
+        + "AND LongestAddGTime NOT IN (17, 105, 20, 22) GROUP BY DepTimeBlk ORDER BY DepTimeBlk";
+    testStarQuery(starQuery, !useMultiStageQueryEngine);
   }
 
-  private void testStarQuery(String starQuery)
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testHardCodedFilteredAggQueries(boolean useMultiStageQueryEngine)
       throws Exception {
-    String referenceQuery = "SET useStarTree = false; " + starQuery;
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
+    String starQuery = "SELECT DepTimeBlk, COUNT(*), COUNT(*) FILTER (WHERE CRSDepTime = 35) FROM mytable "
+        + "WHERE CRSDepTime != 35 GROUP BY DepTimeBlk ORDER BY DepTimeBlk";
+    // Don't verify that the query plan uses StarTree index, as this query results in FILTER_EMPTY in the query plan.
+    // This is still a valuable test, as it caught a bug where only the subFilterContext was being preserved through
+    // AggregationFunctionUtils#buildFilteredAggregationInfos
+    testStarQuery(starQuery, false);
+
+    // Ensure the filtered agg and unfiltered agg can co-exist in one query
+    starQuery = "SELECT DepTimeBlk, COUNT(*), COUNT(*) FILTER (WHERE DivArrDelay > 20) FROM mytable "
+        + "WHERE CRSDepTime != 35 GROUP BY DepTimeBlk ORDER BY DepTimeBlk";
+    testStarQuery(starQuery, !useMultiStageQueryEngine);
+
+    starQuery = "SELECT DepTimeBlk, COUNT(*) FILTER (WHERE CRSDepTime != 35) FROM mytable "
+        + "GROUP BY DepTimeBlk ORDER BY DepTimeBlk";
+    testStarQuery(starQuery, !useMultiStageQueryEngine);
+  }
+
+  private void testStarQuery(String starQuery, boolean verifyPlan)
+      throws Exception {
+    String filterStartreeIndex = "FILTER_STARTREE_INDEX";
+    String explain = "EXPLAIN PLAN FOR ";
+    String disableStarTree = "SET useStarTree = false; ";
+
+    if (verifyPlan) {
+      JsonNode starPlan = postQuery(explain + starQuery);
+      JsonNode referencePlan = postQuery(disableStarTree + explain + starQuery);
+      assertTrue(starPlan.toString().contains(filterStartreeIndex) || starPlan.toString().contains("FILTER_EMPTY")
+              || starPlan.toString().contains("ALL_SEGMENTS_PRUNED_ON_SERVER"),
+          "StarTree query did not indicate use of StarTree index in query plan. Plan: " + starPlan);
+      assertFalse(referencePlan.toString().contains(filterStartreeIndex),
+          "Reference query indicated use of StarTree index in query plan. Plan: " + referencePlan);
+    }
+
     JsonNode starResponse = postQuery(starQuery);
+    String referenceQuery = disableStarTree + starQuery;
     JsonNode referenceResponse = postQuery(referenceQuery);
-    Assert.assertEquals(starResponse.get("resultTable"), referenceResponse.get("resultTable"),
-        "Query comparison failed for: \nStar Query: " + starQuery + "\nStar Response: " + starResponse
-            + "\nReference Query: " + referenceQuery + "\nReference Response: " + referenceResponse);
+    assertEquals(starResponse.get("exceptions").size(), 0);
+    assertEquals(referenceResponse.get("exceptions").size(), 0);
+    assertEquals(starResponse.get("resultTable"), referenceResponse.get("resultTable"), String.format(
+        "Query comparison failed for: \n"
+            + "Star Query: %s\nStar Response: %s\nReference Query: %s\nReference Response: %s\nRandom Seed: %d",
+        starQuery, starResponse, referenceQuery, referenceResponse, _randomSeed));
   }
 
   @AfterClass

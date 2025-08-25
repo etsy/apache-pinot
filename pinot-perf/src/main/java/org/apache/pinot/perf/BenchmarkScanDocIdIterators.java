@@ -123,7 +123,7 @@ public class BenchmarkScanDocIdIterators {
 
   @Benchmark
   public MutableRoaringBitmap benchmarkSVLong() {
-    return new SVScanDocIdIterator(_predicateEvaluator, _readerV2, _numDocs, null).applyAnd(_bitmap);
+    return new SVScanDocIdIterator(_predicateEvaluator, _readerV2, _numDocs).applyAnd(_bitmap);
   }
 
   public static class DummyPredicateEvaluator implements PredicateEvaluator {
@@ -180,18 +180,8 @@ public class BenchmarkScanDocIdIterators {
     }
 
     @Override
-    public int getNumMatchingDictIds() {
-      return 0;
-    }
-
-    @Override
     public int[] getMatchingDictIds() {
       return new int[0];
-    }
-
-    @Override
-    public int getNumNonMatchingDictIds() {
-      return 0;
     }
 
     @Override

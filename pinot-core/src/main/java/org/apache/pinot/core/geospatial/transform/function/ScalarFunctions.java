@@ -22,6 +22,7 @@ import org.apache.pinot.segment.local.utils.GeometrySerializer;
 import org.apache.pinot.segment.local.utils.GeometryUtils;
 import org.apache.pinot.segment.local.utils.H3Utils;
 import org.apache.pinot.spi.annotations.ScalarFunction;
+import org.apache.pinot.spi.utils.BooleanUtils;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.Point;
@@ -42,7 +43,7 @@ public class ScalarFunctions {
    * @param y y
    * @return the created point
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stPoint", "ST_point"})
   public static byte[] stPoint(double x, double y) {
     return GeometrySerializer.serialize(GeometryUtils.GEOMETRY_FACTORY.createPoint(new Coordinate(x, y)));
   }
@@ -55,10 +56,10 @@ public class ScalarFunctions {
    * @param isGeography if it's geography
    * @return the created point
    */
-  @ScalarFunction
-  public static byte[] stPoint(double x, double y, boolean isGeography) {
+  @ScalarFunction(names = {"stPoint", "ST_point"})
+  public static byte[] stPoint(double x, double y, Object isGeography) {
     Point point = GeometryUtils.GEOMETRY_FACTORY.createPoint(new Coordinate(x, y));
-    if (isGeography) {
+    if (BooleanUtils.toBoolean(isGeography)) {
       GeometryUtils.setGeography(point);
     }
     return GeometrySerializer.serialize(point);
@@ -67,7 +68,7 @@ public class ScalarFunctions {
   /**
    * Reads a geometry object from the WKT format.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stGeomFromText", "ST_geom_from_text"})
   public static byte[] stGeomFromText(String wkt)
       throws ParseException {
     return GeometrySerializer.serialize(GeometryUtils.GEOMETRY_WKT_READER.read(wkt));
@@ -76,7 +77,7 @@ public class ScalarFunctions {
   /**
    * Reads a geography object from the WKT format.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stGeogFromText", "ST_geog_from_text"})
   public static byte[] stGeogFromText(String wkt)
       throws ParseException {
     return GeometrySerializer.serialize(GeometryUtils.GEOGRAPHY_WKT_READER.read(wkt));
@@ -85,7 +86,7 @@ public class ScalarFunctions {
   /**
    * Reads a geometry object from the WKB format.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stGeomFromWKB", "ST_geom_from_wkb"})
   public static byte[] stGeomFromWKB(byte[] wkb)
       throws ParseException {
     return GeometrySerializer.serialize(GeometryUtils.GEOMETRY_WKB_READER.read(wkb));
@@ -94,7 +95,7 @@ public class ScalarFunctions {
   /**
    * Reads a geography object from the WKB format.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stGeogFromWKB", "ST_geog_from_wkb"})
   public static byte[] stGeogFromWKB(byte[] wkb)
       throws ParseException {
     return GeometrySerializer.serialize(GeometryUtils.GEOGRAPHY_WKB_READER.read(wkb));
@@ -106,7 +107,7 @@ public class ScalarFunctions {
    * @param bytes the serialized geometry object
    * @return the geometry in WKT
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stAsText", "ST_as_text"})
   public static String stAsText(byte[] bytes) {
     return GeometryUtils.WKT_WRITER.write(GeometrySerializer.deserialize(bytes));
   }
@@ -117,7 +118,7 @@ public class ScalarFunctions {
    * @param bytes the serialized geometry object
    * @return the geometry in WKB
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"stAsBinary", "ST_as_binary"})
   public static byte[] stAsBinary(byte[] bytes) {
     return GeometryUtils.WKB_WRITER.write(GeometrySerializer.deserialize(bytes));
   }
@@ -128,7 +129,7 @@ public class ScalarFunctions {
    * @param bytes the serialized geometry object
    * @return the geographical object
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"toSphericalGeography", "to_spherical_geography"})
   public static byte[] toSphericalGeography(byte[] bytes) {
     Geometry geometry = GeometrySerializer.deserialize(bytes);
     GeometryUtils.setGeography(geometry);
@@ -141,7 +142,7 @@ public class ScalarFunctions {
    * @param bytes the serialized geographical object
    * @return the geometry object
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"toGeometry", "to_geometry"})
   public static byte[] toGeometry(byte[] bytes) {
     Geometry geometry = GeometrySerializer.deserialize(bytes);
     GeometryUtils.setGeometry(geometry);
@@ -155,8 +156,72 @@ public class ScalarFunctions {
    * @param resolution H3 index resolution
    * @return the H3 index address
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"geoToH3", "geo_to_h3"})
   public static long geoToH3(double longitude, double latitude, int resolution) {
     return H3Utils.H3_CORE.geoToH3(latitude, longitude, resolution);
+  }
+
+  /**
+   * Gets the H3 hexagon address from the location
+   * @param geoBytes ST_point serialized bytes
+   * @param resolution H3 index resolution
+   * @return the H3 index address
+   */
+  @ScalarFunction(names = {"geoToH3", "geo_to_h3"})
+  public static long geoToH3(byte[] geoBytes, int resolution) {
+    Geometry geometry = GeometrySerializer.deserialize(geoBytes);
+    double latitude = geometry.getCoordinate().y;
+    double longitude = geometry.getCoordinate().x;
+    return H3Utils.H3_CORE.geoToH3(latitude, longitude, resolution);
+  }
+
+  @ScalarFunction(names = {"stDistance", "ST_distance"})
+  public static double stDistance(byte[] firstPoint, byte[] secondPoint) {
+    Geometry firstGeometry = GeometrySerializer.deserialize(firstPoint);
+    Geometry secondGeometry = GeometrySerializer.deserialize(secondPoint);
+    if (GeometryUtils.isGeography(firstGeometry) != GeometryUtils.isGeography(secondGeometry)) {
+      throw new RuntimeException("The first and second arguments shall either all be geometry or all geography");
+    }
+    if (GeometryUtils.isGeography(firstGeometry)) {
+      return StDistanceFunction.sphericalDistance(firstGeometry, secondGeometry);
+    } else {
+      return firstGeometry.isEmpty() || secondGeometry.isEmpty() ? Double.NaN : firstGeometry.distance(secondGeometry);
+    }
+  }
+
+  @ScalarFunction(names = {"stContains", "st_contains"})
+  public static int stContains(byte[] first, byte[] second) {
+    Geometry firstGeometry = GeometrySerializer.deserialize(first);
+    Geometry secondGeometry = GeometrySerializer.deserialize(second);
+    if (GeometryUtils.isGeography(firstGeometry) != GeometryUtils.isGeography(secondGeometry)) {
+      throw new RuntimeException("The first and second arguments should either both be geometry or both be geography");
+    }
+    // TODO: to fully support Geography contains operation.
+    return firstGeometry.contains(secondGeometry) ? 1 : 0;
+  }
+
+  @ScalarFunction(names = {"stEquals", "st_equals"})
+  public static int stEquals(byte[] first, byte[] second) {
+    Geometry firstGeometry = GeometrySerializer.deserialize(first);
+    Geometry secondGeometry = GeometrySerializer.deserialize(second);
+
+    return firstGeometry.equals(secondGeometry) ? 1 : 0;
+  }
+
+  @ScalarFunction(names = {"stGeometryType", "st_geometry_type"})
+  public static String stGeometryType(byte[] bytes) {
+    Geometry geometry = GeometrySerializer.deserialize(bytes);
+    return geometry.getGeometryType();
+  }
+
+  @ScalarFunction(names = {"stWithin", "st_within"})
+  public static int stWithin(byte[] first, byte[] second) {
+    Geometry firstGeometry = GeometrySerializer.deserialize(first);
+    Geometry secondGeometry = GeometrySerializer.deserialize(second);
+    if (GeometryUtils.isGeography(firstGeometry) != GeometryUtils.isGeography(secondGeometry)) {
+      throw new RuntimeException("The first and second arguments should either both be geometry or both be geography");
+    }
+    // TODO: to fully support Geography within operation.
+    return firstGeometry.within(secondGeometry) ? 1 : 0;
   }
 }

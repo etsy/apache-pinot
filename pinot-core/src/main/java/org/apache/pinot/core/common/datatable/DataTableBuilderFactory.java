@@ -34,7 +34,7 @@ public class DataTableBuilderFactory {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(DataTableBuilderFactory.class);
 
-  public static final int DEFAULT_VERSION = DataTableFactory.VERSION_3;
+  public static final int DEFAULT_VERSION = DataTableFactory.VERSION_4;
 
   private static int _version = DEFAULT_VERSION;
 
@@ -43,7 +43,7 @@ public class DataTableBuilderFactory {
   }
 
   public static void setDataTableVersion(int version) {
-    LOGGER.info("Setting DataTable version to: " + version);
+    LOGGER.info("Setting DataTable version to: {}", version);
     if (version != DataTableFactory.VERSION_2 && version != DataTableFactory.VERSION_3
         && version != DataTableFactory.VERSION_4) {
       throw new IllegalArgumentException("Unsupported version: " + version);

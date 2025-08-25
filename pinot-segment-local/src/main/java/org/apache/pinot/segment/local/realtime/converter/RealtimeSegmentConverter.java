@@ -19,6 +19,7 @@
 package org.apache.pinot.segment.local.realtime.converter;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.util.Collection;
 import java.util.Map;
 import javax.annotation.Nullable;
 import org.apache.pinot.common.metrics.ServerGauge;
@@ -27,14 +28,21 @@ import org.apache.pinot.segment.local.indexsegment.mutable.MutableSegmentImpl;
 import org.apache.pinot.segment.local.realtime.converter.stats.RealtimeSegmentSegmentCreationDataSource;
 import org.apache.pinot.segment.local.segment.creator.TransformPipeline;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
+import org.apache.pinot.segment.local.segment.index.text.TextIndexConfigBuilder;
 import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
+import org.apache.pinot.segment.spi.index.FstIndexConfig;
+import org.apache.pinot.segment.spi.index.IndexType;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
+import org.apache.pinot.spi.config.table.IndexConfig;
 import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.SegmentZKPropsConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.recordenricher.RecordEnricherPipeline;
 
 
 public class RealtimeSegmentConverter {
@@ -47,6 +55,7 @@ public class RealtimeSegmentConverter {
   private final String _segmentName;
   private final ColumnIndicesForRealtimeTable _columnIndicesForRealtimeTable;
   private final boolean _nullHandlingEnabled;
+  private final boolean _enableColumnMajor;
 
   public RealtimeSegmentConverter(MutableSegmentImpl realtimeSegment, SegmentZKPropsConfig segmentZKPropsConfig,
       String outputPath, Schema schema, String tableName, TableConfig tableConfig, String segmentName,
@@ -63,11 +72,19 @@ public class RealtimeSegmentConverter {
     _tableConfig = tableConfig;
     _segmentName = segmentName;
     _nullHandlingEnabled = nullHandlingEnabled;
+    if (_tableConfig.getIngestionConfig() != null
+        && _tableConfig.getIngestionConfig().getStreamIngestionConfig() != null) {
+      _enableColumnMajor = _tableConfig.getIngestionConfig()
+          .getStreamIngestionConfig().getColumnMajorSegmentBuilderEnabled();
+    } else {
+      _enableColumnMajor = _tableConfig.getIndexingConfig().isColumnMajorSegmentBuilderEnabled();
+    }
   }
 
   public void build(@Nullable SegmentVersion segmentVersion, ServerMetrics serverMetrics)
       throws Exception {
     SegmentGeneratorConfig genConfig = new SegmentGeneratorConfig(_tableConfig, _dataSchema);
+
     // The segment generation code in SegmentColumnarIndexCreator will throw
     // exception if start and end time in time column are not in acceptable
     // range. We don't want the realtime consumption to stop (if an exception
@@ -75,9 +92,8 @@ public class RealtimeSegmentConverter {
     // realtime segment generation
     genConfig.setSegmentTimeValueCheck(false);
     if (_columnIndicesForRealtimeTable.getInvertedIndexColumns() != null) {
-      for (String column : _columnIndicesForRealtimeTable.getInvertedIndexColumns()) {
-        genConfig.createInvertedIndexForColumn(column);
-      }
+      genConfig.setIndexOn(StandardIndexes.inverted(), IndexConfig.ENABLED,
+          _columnIndicesForRealtimeTable.getInvertedIndexColumns());
     }
 
     if (_columnIndicesForRealtimeTable.getVarLengthDictionaryColumns() != null) {
@@ -90,24 +106,37 @@ public class RealtimeSegmentConverter {
     genConfig.setTableName(_tableName);
     genConfig.setOutDir(_outputPath);
     genConfig.setSegmentName(_segmentName);
-    genConfig.setTextIndexCreationColumns(_columnIndicesForRealtimeTable.getTextIndexColumns());
-    genConfig.setFSTIndexCreationColumns(_columnIndicesForRealtimeTable.getFstIndexColumns());
+
+    addIndexOrDefault(genConfig, StandardIndexes.text(), _columnIndicesForRealtimeTable.getTextIndexColumns(),
+        new TextIndexConfigBuilder(genConfig.getFSTIndexType()).build());
+
+    addIndexOrDefault(genConfig, StandardIndexes.fst(), _columnIndicesForRealtimeTable.getFstIndexColumns(),
+        new FstIndexConfig(genConfig.getFSTIndexType()));
+
     SegmentPartitionConfig segmentPartitionConfig = _realtimeSegmentImpl.getSegmentPartitionConfig();
     genConfig.setSegmentPartitionConfig(segmentPartitionConfig);
     genConfig.setNullHandlingEnabled(_nullHandlingEnabled);
     genConfig.setSegmentZKPropsConfig(_segmentZKPropsConfig);
 
+    // flush any artifacts to disk to improve mutable to immutable segment conversion
+    _realtimeSegmentImpl.commit();
+
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
     try (PinotSegmentRecordReader recordReader = new PinotSegmentRecordReader()) {
-      int[] sortedDocIds =
-          _columnIndicesForRealtimeTable.getSortedColumn() != null
-              ? _realtimeSegmentImpl.getSortedDocIdIterationOrderWithSortedColumn(
-                  _columnIndicesForRealtimeTable.getSortedColumn()) : null;
+      int[] sortedDocIds = _columnIndicesForRealtimeTable.getSortedColumn() != null
+          ? _realtimeSegmentImpl.getSortedDocIdIterationOrderWithSortedColumn(
+          _columnIndicesForRealtimeTable.getSortedColumn()) : null;
       recordReader.init(_realtimeSegmentImpl, sortedDocIds);
       RealtimeSegmentSegmentCreationDataSource dataSource =
           new RealtimeSegmentSegmentCreationDataSource(_realtimeSegmentImpl, recordReader);
-      driver.init(genConfig, dataSource, TransformPipeline.getPassThroughPipeline());
-      driver.build();
+      driver.init(genConfig, dataSource, RecordEnricherPipeline.getPassThroughPipeline(),
+          TransformPipeline.getPassThroughPipeline());
+
+      if (!_enableColumnMajor) {
+        driver.build();
+      } else {
+        driver.buildByColumn(_realtimeSegmentImpl);
+      }
     }
 
     if (segmentPartitionConfig != null) {
@@ -119,15 +148,32 @@ public class RealtimeSegmentConverter {
     }
   }
 
+  private <C extends IndexConfig> void addIndexOrDefault(SegmentGeneratorConfig genConfig, IndexType<C, ?, ?> indexType,
+      @Nullable Collection<String> columns, C defaultConfig) {
+    Map<String, C> config = indexType.getConfig(genConfig.getTableConfig(), genConfig.getSchema());
+    if (columns != null) {
+      for (String column : columns) {
+        C colConf = config.get(column);
+        genConfig.setIndexOn(indexType, colConf == null ? defaultConfig : colConf, column);
+      }
+    }
+  }
+
   /**
    * Returns a new schema containing only physical columns
    */
   @VisibleForTesting
   public static Schema getUpdatedSchema(Schema original) {
     Schema newSchema = new Schema();
-    for (String col : original.getPhysicalColumnNames()) {
-      newSchema.addField(original.getFieldSpecFor(col));
+    for (FieldSpec fieldSpec : original.getAllFieldSpecs()) {
+      if (!fieldSpec.isVirtualColumn()) {
+        newSchema.addField(fieldSpec);
+      }
     }
     return newSchema;
+  }
+
+  public boolean isColumnMajorEnabled() {
+    return _enableColumnMajor;
   }
 }

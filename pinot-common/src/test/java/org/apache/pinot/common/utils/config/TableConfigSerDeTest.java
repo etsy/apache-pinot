@@ -64,11 +64,12 @@ import static org.testng.Assert.*;
 
 
 public class TableConfigSerDeTest {
-
+  private static final double NO_DICTIONARY_THRESHOLD_RATIO = 0.72;
   @Test
   public void testSerDe()
       throws IOException {
-    TableConfigBuilder tableConfigBuilder = new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable");
+    TableConfigBuilder tableConfigBuilder = new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable")
+        .setNoDictionarySizeRatioThreshold(NO_DICTIONARY_THRESHOLD_RATIO).setOptimizeDictionaryForMetrics(true);
     {
       // Default table config
       TableConfig tableConfig = tableConfigBuilder.build();
@@ -175,7 +176,7 @@ public class TableConfigSerDeTest {
     {
       // With routing config
       RoutingConfig routingConfig =
-          new RoutingConfig("builder", Arrays.asList("pruner0", "pruner1", "pruner2"), "selector");
+          new RoutingConfig("builder", Arrays.asList("pruner0", "pruner1", "pruner2"), "selector", false);
       TableConfig tableConfig = tableConfigBuilder.setRoutingConfig(routingConfig).build();
 
       checkRoutingConfig(tableConfig);
@@ -191,7 +192,8 @@ public class TableConfigSerDeTest {
     }
     {
       // With query config
-      QueryConfig queryConfig = new QueryConfig(1000L, true, true, Collections.singletonMap("func(a)", "b"));
+      QueryConfig queryConfig = new QueryConfig(1000L, true, true, Collections.singletonMap("func(a)", "b"), null,
+          null);
       TableConfig tableConfig = tableConfigBuilder.setQueryConfig(queryConfig).build();
 
       checkQueryConfig(tableConfig);
@@ -210,9 +212,9 @@ public class TableConfigSerDeTest {
       InstanceAssignmentConfig instanceAssignmentConfig =
           new InstanceAssignmentConfig(new InstanceTagPoolConfig("tenant_OFFLINE", true, 3, null),
               new InstanceConstraintConfig(Arrays.asList("constraint1", "constraint2")),
-              new InstanceReplicaGroupPartitionConfig(true, 0, 3, 5, 0, 0, false));
+              new InstanceReplicaGroupPartitionConfig(true, 0, 3, 5, 0, 0, false, null), null, false);
       TableConfig tableConfig = tableConfigBuilder.setInstanceAssignmentConfigMap(
-          Collections.singletonMap(InstancePartitionsType.OFFLINE, instanceAssignmentConfig)).build();
+          Collections.singletonMap(InstancePartitionsType.OFFLINE.toString(), instanceAssignmentConfig)).build();
 
       checkInstanceAssignmentConfig(tableConfig);
 
@@ -367,6 +369,8 @@ public class TableConfigSerDeTest {
     assertNull(tableConfig.getInstanceAssignmentConfigMap());
     assertNull(tableConfig.getSegmentAssignmentConfigMap());
     assertNull(tableConfig.getFieldConfigList());
+    assertEquals(tableConfig.getIndexingConfig().isOptimizeDictionaryForMetrics(), true);
+    assertEquals(tableConfig.getIndexingConfig().getNoDictionarySizeRatioThreshold(), NO_DICTIONARY_THRESHOLD_RATIO);
 
     // Serialize
     ObjectNode tableConfigJson = (ObjectNode) tableConfig.toJsonNode();
@@ -488,12 +492,12 @@ public class TableConfigSerDeTest {
   }
 
   private void checkInstanceAssignmentConfig(TableConfig tableConfig) {
-    Map<InstancePartitionsType, InstanceAssignmentConfig> instanceAssignmentConfigMap =
-        tableConfig.getInstanceAssignmentConfigMap();
+    Map<String, InstanceAssignmentConfig> instanceAssignmentConfigMap = tableConfig.getInstanceAssignmentConfigMap();
     assertNotNull(instanceAssignmentConfigMap);
     assertEquals(instanceAssignmentConfigMap.size(), 1);
-    assertTrue(instanceAssignmentConfigMap.containsKey(InstancePartitionsType.OFFLINE));
-    InstanceAssignmentConfig instanceAssignmentConfig = instanceAssignmentConfigMap.get(InstancePartitionsType.OFFLINE);
+    assertTrue(instanceAssignmentConfigMap.containsKey(InstancePartitionsType.OFFLINE.toString()));
+    InstanceAssignmentConfig instanceAssignmentConfig =
+        instanceAssignmentConfigMap.get(InstancePartitionsType.OFFLINE.toString());
 
     InstanceTagPoolConfig tagPoolConfig = instanceAssignmentConfig.getTagPoolConfig();
     assertEquals(tagPoolConfig.getTag(), "tenant_OFFLINE");
@@ -532,7 +536,7 @@ public class TableConfigSerDeTest {
 
     FieldConfig secondFieldConfig = fieldConfigList.get(1);
     assertEquals(secondFieldConfig.getName(), "column2");
-    assertNull(secondFieldConfig.getEncodingType());
+    assertEquals(secondFieldConfig.getEncodingType(), FieldConfig.EncodingType.DICTIONARY);
     assertNull(secondFieldConfig.getIndexType());
     assertEquals(secondFieldConfig.getIndexTypes().size(), 0);
     assertNull(secondFieldConfig.getProperties());

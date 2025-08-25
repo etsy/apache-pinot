@@ -22,7 +22,6 @@ import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -34,6 +33,7 @@ import java.util.UUID;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.segment.generation.SegmentGenerationUtils;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationJobUtils;
 import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationTaskRunner;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -275,6 +275,7 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
           taskSpec.setSequenceId(idx);
           taskSpec.setSegmentNameGeneratorSpec(_spec.getSegmentNameGeneratorSpec());
           taskSpec.setFailOnEmptySegment(_spec.isFailOnEmptySegment());
+          taskSpec.setCreateMetadataTarGz(_spec.isCreateMetadataTarGz());
           taskSpec.setCustomProperty(BatchConfigProperties.INPUT_DATA_FILE_URI_KEY, inputFileURI.toString());
 
           SegmentGenerationTaskRunner taskRunner = new SegmentGenerationTaskRunner(taskSpec);
@@ -282,7 +283,7 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
 
           // Tar segment directory to compress file
           File localSegmentDir = new File(localOutputTempDir, segmentName);
-          String segmentTarFileName = URLEncoder.encode(segmentName + Constants.TAR_GZ_FILE_EXT, "UTF-8");
+          String segmentTarFileName = URIUtils.encode(segmentName + Constants.TAR_GZ_FILE_EXT);
           File localSegmentTarFile = new File(localOutputTempDir, segmentTarFileName);
           LOGGER.info("Tarring segment from: {} to: {}", localSegmentDir, localSegmentTarFile);
           TarGzCompressionUtils.createTarGzFile(localSegmentDir, localSegmentTarFile);
@@ -290,20 +291,29 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
           long compressedSegmentSize = FileUtils.sizeOf(localSegmentTarFile);
           LOGGER.info("Size for segment: {}, uncompressed: {}, compressed: {}", segmentName,
               DataSizeUtils.fromBytes(uncompressedSegmentSize), DataSizeUtils.fromBytes(compressedSegmentSize));
-          //move segment to output PinotFS
-          URI outputSegmentTarURI =
-              SegmentGenerationUtils.getRelativeOutputPath(finalInputDirURI, inputFileURI, finalOutputDirURI)
-                  .resolve(segmentTarFileName);
-          LOGGER.info("Trying to move segment tar file from: [{}] to [{}]", localSegmentTarFile, outputSegmentTarURI);
-          if (!_spec.isOverwriteOutput() && PinotFSFactory.create(outputSegmentTarURI.getScheme())
-              .exists(outputSegmentTarURI)) {
-            LOGGER.warn("Not overwrite existing output segment tar file: {}",
-                finalOutputDirFS.exists(outputSegmentTarURI));
-          } else {
-            finalOutputDirFS.copyFromLocalFile(localSegmentTarFile, outputSegmentTarURI);
+          // Move segment to output PinotFS
+          URI relativeOutputPath =
+              SegmentGenerationUtils.getRelativeOutputPath(finalInputDirURI, inputFileURI, finalOutputDirURI);
+          URI outputSegmentTarURI = relativeOutputPath.resolve(segmentTarFileName);
+          SegmentGenerationJobUtils.moveLocalTarFileToRemote(localSegmentTarFile, outputSegmentTarURI,
+              _spec.isOverwriteOutput());
+
+          // Create and upload segment metadata tar file
+          String metadataTarFileName = URIUtils.encode(segmentName + Constants.METADATA_TAR_GZ_FILE_EXT);
+          URI outputMetadataTarURI = relativeOutputPath.resolve(metadataTarFileName);
+
+          if (finalOutputDirFS.exists(outputMetadataTarURI) && (_spec.isOverwriteOutput()
+              || !_spec.isCreateMetadataTarGz())) {
+            LOGGER.info("Deleting existing metadata tar gz file: {}", outputMetadataTarURI);
+            finalOutputDirFS.delete(outputMetadataTarURI, true);
+          }
+          if (taskSpec.isCreateMetadataTarGz()) {
+            File localMetadataTarFile = new File(localOutputTempDir, metadataTarFileName);
+            SegmentGenerationJobUtils.createSegmentMetadataTarGz(localSegmentDir, localMetadataTarFile);
+            SegmentGenerationJobUtils.moveLocalTarFileToRemote(localMetadataTarFile, outputMetadataTarURI,
+                _spec.isOverwriteOutput());
           }
           FileUtils.deleteQuietly(localSegmentDir);
-          FileUtils.deleteQuietly(localSegmentTarFile);
           FileUtils.deleteQuietly(localInputDataFile);
         }
       });

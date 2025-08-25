@@ -21,9 +21,10 @@ package org.apache.pinot.core.data.manager;
 import java.io.File;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.commons.configuration.ConfigurationException;
+import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
@@ -45,6 +46,7 @@ public interface InstanceDataManager {
   /**
    * Initializes the data manager.
    * <p>Should be called only once and before calling any other method.
+   * <p>NOTE: The config is the subset of server config with prefix 'pinot.server.instance'
    */
   void init(PinotConfiguration config, HelixManager helixManager, ServerMetrics serverMetrics)
       throws ConfigurationException;
@@ -73,26 +75,37 @@ public interface InstanceDataManager {
       throws Exception;
 
   /**
-   * Adds a segment from local disk into an OFFLINE table.
+   * Adds an ONLINE segment into a table.
+   * This method is triggered by state transition to ONLINE state.
    */
-  void addOfflineSegment(String offlineTableName, String segmentName, File indexDir)
+  void addOnlineSegment(String tableNameWithType, String segmentName)
       throws Exception;
 
   /**
-   * Adds a segment into an REALTIME table.
-   * <p>The segment might be committed or under consuming.
+   * Adds a CONSUMING segment into a REALTIME table.
+   * This method is triggered by state transition to CONSUMING state.
    */
-  void addRealtimeSegment(String realtimeTableName, String segmentName)
+  void addConsumingSegment(String realtimeTableName, String segmentName)
+      throws Exception;
+
+  /**
+   * Replaces an already loaded segment in a table if the segment has been overridden in the deep store (CRC mismatch).
+   * This method is triggered by a custom message (NOT state transition), and the target segment should be in ONLINE
+   * state.
+   */
+  void replaceSegment(String tableNameWithType, String segmentName)
       throws Exception;
 
   /**
    * Offloads a segment from table but not dropping its data from server.
+   * This method is triggered by state transition to OFFLINE state.
    */
   void offloadSegment(String tableNameWithType, String segmentName)
       throws Exception;
 
   /**
    * Delete segment data from the server physically.
+   * This method is triggered by state transition to DROPPED state.
    */
   void deleteSegment(String tableNameWithType, String segmentName)
       throws Exception;
@@ -120,15 +133,6 @@ public interface InstanceDataManager {
    */
   void reloadSegments(String tableNameWithType, List<String> segmentNames, boolean forceDownload,
       SegmentRefreshSemaphore segmentRefreshSemaphore)
-      throws Exception;
-
-  /**
-   * Adds or replaces a segment in a table. Different from segment reloading, this method
-   * doesn't assume the existence of TableDataManager object and it can actually initialize
-   * the TableDataManager for the segment. A new segment is downloaded if the local one is
-   * not working or has a different CRC from the remote one.
-   */
-  void addOrReplaceSegment(String tableNameWithType, String segmentName)
       throws Exception;
 
   /**
@@ -183,4 +187,11 @@ public interface InstanceDataManager {
    * Immediately stop consumption and start committing the consuming segments.
    */
   void forceCommit(String tableNameWithType, Set<String> segmentNames);
+
+  /**
+   * Enables the installation of a method to determine if a server is ready to server queries.
+   *
+   * @param isServerReadyToServeQueries supplier to retrieve state of server.
+   */
+  void setSupplierOfIsServerReadyToServeQueries(Supplier<Boolean> isServerReadyToServeQueries);
 }

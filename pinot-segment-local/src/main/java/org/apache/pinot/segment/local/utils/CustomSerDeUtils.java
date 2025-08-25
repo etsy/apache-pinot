@@ -19,13 +19,18 @@
 package org.apache.pinot.segment.local.utils;
 
 import com.clearspring.analytics.stream.cardinality.HyperLogLog;
+import com.clearspring.analytics.stream.cardinality.HyperLogLogPlus;
+import com.dynatrace.hash4j.distinctcount.UltraLogLog;
 import com.google.common.primitives.Longs;
 import com.tdunning.math.stats.MergingDigest;
 import com.tdunning.math.stats.TDigest;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import org.apache.datasketches.cpc.CpcSketch;
 import org.apache.datasketches.memory.Memory;
 import org.apache.datasketches.theta.Sketch;
+import org.apache.datasketches.tuple.aninteger.IntegerSummary;
+import org.apache.datasketches.tuple.aninteger.IntegerSummaryDeserializer;
 import org.apache.pinot.segment.local.customobject.AvgPair;
 import org.apache.pinot.segment.local.customobject.MinMaxRangePair;
 import org.apache.pinot.segment.local.customobject.QuantileDigest;
@@ -186,6 +191,34 @@ public class CustomSerDeUtils {
     }
   };
 
+  public static final ObjectSerDe<HyperLogLogPlus> HYPER_LOG_LOG_PLUS_SER_DE = new ObjectSerDe<HyperLogLogPlus>() {
+
+    @Override
+    public byte[] serialize(HyperLogLogPlus hyperLogLogPlus) {
+      try {
+        return hyperLogLogPlus.getBytes();
+      } catch (IOException e) {
+        throw new RuntimeException("Caught exception while serializing HyperLogLogPlus", e);
+      }
+    }
+
+    @Override
+    public HyperLogLogPlus deserialize(byte[] bytes) {
+      try {
+        return HyperLogLogPlus.Builder.build(bytes);
+      } catch (IOException e) {
+        throw new RuntimeException("Caught exception while de-serializing HyperLogLogPlus", e);
+      }
+    }
+
+    @Override
+    public HyperLogLogPlus deserialize(ByteBuffer byteBuffer) {
+      byte[] bytes = new byte[byteBuffer.remaining()];
+      byteBuffer.get(bytes);
+      return deserialize(bytes);
+    }
+  };
+
   public static final ObjectSerDe<TDigest> TDIGEST_SER_DE = new ObjectSerDe<TDigest>() {
 
     @Override
@@ -206,13 +239,16 @@ public class CustomSerDeUtils {
     }
   };
 
-  public static final ObjectSerDe<Sketch> DATA_SKETCH_SER_DE = new ObjectSerDe<Sketch>() {
+  public static final ObjectSerDe<Sketch> DATA_SKETCH_THETA_SER_DE = new ObjectSerDe<Sketch>() {
 
     @Override
     public byte[] serialize(Sketch value) {
-      // NOTE: Compact the sketch in unsorted, on-heap fashion for performance concern.
-      //       See https://datasketches.apache.org/docs/Theta/ThetaSize.html for more details.
-      return value.compact(false, null).toByteArray();
+      // The serializer should respect existing ordering to enable "early stop"
+      // optimisations on unions.
+      if (!value.isCompact()) {
+        return value.compact(value.isOrdered(), null).toByteArray();
+      }
+      return value.toByteArray();
     }
 
     @Override
@@ -225,6 +261,48 @@ public class CustomSerDeUtils {
       byte[] bytes = new byte[byteBuffer.remaining()];
       byteBuffer.get(bytes);
       return Sketch.wrap(Memory.wrap(bytes));
+    }
+  };
+
+  public static final ObjectSerDe<org.apache.datasketches.tuple.Sketch<IntegerSummary>> DATA_SKETCH_INT_TUPLE_SER_DE =
+      new ObjectSerDe<org.apache.datasketches.tuple.Sketch<IntegerSummary>>() {
+        @Override
+        public byte[] serialize(org.apache.datasketches.tuple.Sketch<IntegerSummary> value) {
+          return value.compact().toByteArray();
+        }
+
+        @Override
+        public org.apache.datasketches.tuple.Sketch<IntegerSummary> deserialize(byte[] bytes) {
+          return org.apache.datasketches.tuple.Sketches.heapifySketch(Memory.wrap(bytes),
+              new IntegerSummaryDeserializer());
+        }
+
+        @Override
+        public org.apache.datasketches.tuple.Sketch<IntegerSummary> deserialize(ByteBuffer byteBuffer) {
+          byte[] bytes = new byte[byteBuffer.remaining()];
+          byteBuffer.get(bytes);
+          return org.apache.datasketches.tuple.Sketches.heapifySketch(Memory.wrap(bytes),
+              new IntegerSummaryDeserializer());
+        }
+      };
+
+  public static final ObjectSerDe<CpcSketch> DATA_SKETCH_CPC_SER_DE = new ObjectSerDe<CpcSketch>() {
+
+    @Override
+    public byte[] serialize(CpcSketch value) {
+      return value.toByteArray();
+    }
+
+    @Override
+    public CpcSketch deserialize(byte[] bytes) {
+      return CpcSketch.heapify(Memory.wrap(bytes));
+    }
+
+    @Override
+    public CpcSketch deserialize(ByteBuffer byteBuffer) {
+      byte[] bytes = new byte[byteBuffer.remaining()];
+      byteBuffer.get(bytes);
+      return CpcSketch.heapify(Memory.wrap(bytes));
     }
   };
 
@@ -270,6 +348,30 @@ public class CustomSerDeUtils {
     @Override
     public QuantileDigest deserialize(ByteBuffer byteBuffer) {
       return QuantileDigest.fromByteBuffer(byteBuffer);
+    }
+  };
+
+  public static final ObjectSerDe<UltraLogLog> ULTRA_LOG_LOG_OBJECT_SER_DE = new ObjectSerDe<UltraLogLog>() {
+
+    @Override
+    public byte[] serialize(UltraLogLog value) {
+      ByteBuffer buff = ByteBuffer.wrap(new byte[(1 << value.getP()) + 1]);
+      buff.put((byte) value.getP());
+      buff.put(value.getState());
+      return buff.array();
+    }
+
+    @Override
+    public UltraLogLog deserialize(byte[] bytes) {
+      return deserialize(ByteBuffer.wrap(bytes));
+    }
+
+    @Override
+    public UltraLogLog deserialize(ByteBuffer byteBuffer) {
+      byte p = byteBuffer.get();
+      byte[] state = new byte[1 << p];
+      byteBuffer.get(state);
+      return UltraLogLog.wrap(state);
     }
   };
 }

@@ -42,6 +42,9 @@ import org.apache.pinot.segment.spi.FetchContext;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.datasource.DataSource;
+import org.apache.pinot.segment.spi.index.IndexReader;
+import org.apache.pinot.segment.spi.index.IndexType;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.index.column.ColumnIndexContainer;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
@@ -73,6 +76,7 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
   // For upsert
   private PartitionUpsertMetadataManager _partitionUpsertMetadataManager;
   private ThreadSafeMutableRoaringBitmap _validDocIds;
+  private ThreadSafeMutableRoaringBitmap _queryableDocIds;
 
   public ImmutableSegmentImpl(SegmentDirectory segmentDirectory, SegmentMetadataImpl segmentMetadata,
       Map<String, ColumnIndexContainer> columnIndexContainerMap,
@@ -97,9 +101,10 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
    * Enables upsert for this segment. It should be called before the segment getting queried.
    */
   public void enableUpsert(PartitionUpsertMetadataManager partitionUpsertMetadataManager,
-      ThreadSafeMutableRoaringBitmap validDocIds) {
+      ThreadSafeMutableRoaringBitmap validDocIds, @Nullable ThreadSafeMutableRoaringBitmap queryableDocIds) {
     _partitionUpsertMetadataManager = partitionUpsertMetadataManager;
     _validDocIds = validDocIds;
+    _queryableDocIds = queryableDocIds;
   }
 
   @Nullable
@@ -109,42 +114,55 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
       try {
         byte[] bytes = FileUtils.readFileToByteArray(validDocIdsSnapshotFile);
         MutableRoaringBitmap validDocIds = new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes)).toMutableRoaringBitmap();
-        LOGGER.info("Loaded valid doc ids for segment: {} with: {} valid docs", getSegmentName(),
+        LOGGER.info("Loaded validDocIds for segment: {} with: {} valid docs", getSegmentName(),
             validDocIds.getCardinality());
         return validDocIds;
       } catch (Exception e) {
-        LOGGER.warn("Caught exception while loading valid doc ids from snapshot file: {}, ignoring the snapshot",
+        LOGGER.warn("Caught exception while loading validDocIds from snapshot file: {}, ignoring the snapshot",
             validDocIdsSnapshotFile);
       }
     }
     return null;
   }
 
-  public void persistValidDocIdsSnapshot(MutableRoaringBitmap validDocIds) {
+  public void persistValidDocIdsSnapshot() {
     File validDocIdsSnapshotFile = getValidDocIdsSnapshotFile();
     try {
-      if (validDocIdsSnapshotFile.exists()) {
-        FileUtils.delete(validDocIdsSnapshotFile);
+      File tmpFile = new File(SegmentDirectoryPaths.findSegmentDirectory(_segmentMetadata.getIndexDir()),
+          V1Constants.VALID_DOC_IDS_SNAPSHOT_FILE_NAME + "_tmp");
+      if (tmpFile.exists()) {
+        LOGGER.warn("Previous snapshot was not taken cleanly. Remove tmp file: {}", tmpFile);
+        FileUtils.deleteQuietly(tmpFile);
       }
-      try (DataOutputStream dataOutputStream = new DataOutputStream(new FileOutputStream(validDocIdsSnapshotFile))) {
-        validDocIds.serialize(dataOutputStream);
+      MutableRoaringBitmap validDocIdsSnapshot = _validDocIds.getMutableRoaringBitmap();
+      try (DataOutputStream dataOutputStream = new DataOutputStream(new FileOutputStream(tmpFile))) {
+        validDocIdsSnapshot.serialize(dataOutputStream);
       }
-      LOGGER.info("Persisted valid doc ids for segment: {} with: {} valid docs", getSegmentName(),
-          validDocIds.getCardinality());
+      Preconditions.checkState(tmpFile.renameTo(validDocIdsSnapshotFile),
+          "Failed to rename tmp snapshot file: %s to snapshot file: %s", tmpFile, validDocIdsSnapshotFile);
+      LOGGER.info("Persisted validDocIds for segment: {} with: {} valid docs", getSegmentName(),
+          validDocIdsSnapshot.getCardinality());
     } catch (Exception e) {
-      LOGGER.warn("Caught exception while persisting valid doc ids to snapshot file: {}, skipping",
-          validDocIdsSnapshotFile);
+      LOGGER.warn("Caught exception while persisting validDocIds to snapshot file: {}, skipping",
+          validDocIdsSnapshotFile, e);
     }
+  }
+
+  public boolean hasValidDocIdsSnapshotFile() {
+    return getValidDocIdsSnapshotFile().exists();
   }
 
   public void deleteValidDocIdsSnapshot() {
     File validDocIdsSnapshotFile = getValidDocIdsSnapshotFile();
     if (validDocIdsSnapshotFile.exists()) {
       try {
-        FileUtils.delete(validDocIdsSnapshotFile);
-        LOGGER.info("Deleted valid doc ids snapshot for segment: {}", getSegmentName());
+        if (!FileUtils.deleteQuietly(validDocIdsSnapshotFile)) {
+          LOGGER.warn("Cannot delete old validDocIds snapshot file: {}, skipping", validDocIdsSnapshotFile);
+          return;
+        }
+        LOGGER.info("Deleted validDocIds snapshot for segment: {}", getSegmentName());
       } catch (Exception e) {
-        LOGGER.warn("Caught exception while deleting valid doc ids snapshot file: {}, skipping",
+        LOGGER.warn("Caught exception while deleting validDocIds snapshot file: {}, skipping",
             validDocIdsSnapshotFile);
       }
     }
@@ -156,22 +174,27 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
   }
 
   @Override
-  public Dictionary getDictionary(String column) {
+  public <I extends IndexReader> I getIndex(String column, IndexType<?, I, ?> type) {
     ColumnIndexContainer container = _indexContainerMap.get(column);
     if (container == null) {
       throw new NullPointerException("Invalid column: " + column);
     }
-    return container.getDictionary();
+    return type.getIndexReader(container);
+  }
+
+  @Override
+  public Dictionary getDictionary(String column) {
+    return getIndex(column, StandardIndexes.dictionary());
   }
 
   @Override
   public ForwardIndexReader getForwardIndex(String column) {
-    return _indexContainerMap.get(column).getForwardIndex();
+    return getIndex(column, StandardIndexes.forward());
   }
 
   @Override
   public InvertedIndexReader getInvertedIndex(String column) {
-    return _indexContainerMap.get(column).getInvertedIndex();
+    return getIndex(column, StandardIndexes.inverted());
   }
 
   @Override
@@ -229,19 +252,27 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
   }
 
   @Override
-  public void destroy() {
-    String segmentName = getSegmentName();
-    LOGGER.info("Trying to destroy segment : {}", segmentName);
-
-    // Remove the upsert and dedup metadata before closing the readers
+  public void offload() {
     if (_partitionUpsertMetadataManager != null) {
       _partitionUpsertMetadataManager.removeSegment(this);
     }
-
     if (_partitionDedupMetadataManager != null) {
       _partitionDedupMetadataManager.removeSegment(this);
     }
+  }
 
+  @Override
+  public void destroy() {
+    String segmentName = getSegmentName();
+    LOGGER.info("Trying to destroy segment : {}", segmentName);
+    // StarTreeIndexContainer refers to other column index containers, so close it firstly.
+    if (_starTreeIndexContainer != null) {
+      try {
+        _starTreeIndexContainer.close();
+      } catch (IOException e) {
+        LOGGER.error("Failed to close star-tree. Continuing with error.", e);
+      }
+    }
     for (Map.Entry<String, ColumnIndexContainer> entry : _indexContainerMap.entrySet()) {
       try {
         entry.getValue().close();
@@ -254,13 +285,6 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
     } catch (Exception e) {
       LOGGER.error("Failed to close segment directory: {}. Continuing with error.", _segmentDirectory, e);
     }
-    if (_starTreeIndexContainer != null) {
-      try {
-        _starTreeIndexContainer.close();
-      } catch (IOException e) {
-        LOGGER.error("Failed to close star-tree. Continuing with error.", e);
-      }
-    }
   }
 
   @Override
@@ -272,6 +296,12 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
   @Override
   public ThreadSafeMutableRoaringBitmap getValidDocIds() {
     return _validDocIds;
+  }
+
+  @Nullable
+  @Override
+  public ThreadSafeMutableRoaringBitmap getQueryableDocIds() {
+    return _queryableDocIds;
   }
 
   @Override

@@ -22,10 +22,10 @@ import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.ObjectSerDeUtils;
-import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.groupby.GroupByResultHolder;
 import org.apache.pinot.segment.local.customobject.StringLongPair;
 import org.apache.pinot.segment.local.customobject.ValueLongPair;
+import org.roaringbitmap.IntIterator;
 
 
 /**
@@ -38,14 +38,12 @@ import org.apache.pinot.segment.local.customobject.ValueLongPair;
  *   Numeric column</li>
  * </ul>
  */
-@SuppressWarnings({"rawtypes", "unchecked"})
 public class FirstStringValueWithTimeAggregationFunction extends FirstWithTimeAggregationFunction<String> {
   private final static ValueLongPair<String> DEFAULT_VALUE_TIME_PAIR = new StringLongPair("", Long.MAX_VALUE);
 
-  public FirstStringValueWithTimeAggregationFunction(
-      ExpressionContext dataCol,
-      ExpressionContext timeCol) {
-    super(dataCol, timeCol, ObjectSerDeUtils.STRING_LONG_PAIR_SER_DE);
+  public FirstStringValueWithTimeAggregationFunction(ExpressionContext dataCol, ExpressionContext timeCol,
+      boolean nullHandlingEnabled) {
+    super(dataCol, timeCol, ObjectSerDeUtils.STRING_LONG_PAIR_SER_DE, nullHandlingEnabled);
   }
 
   @Override
@@ -59,62 +57,47 @@ public class FirstStringValueWithTimeAggregationFunction extends FirstWithTimeAg
   }
 
   @Override
-  public void aggregateResultWithRawData(int length, AggregationResultHolder aggregationResultHolder,
-      BlockValSet blockValSet, BlockValSet timeValSet) {
-    ValueLongPair<String> defaultValueLongPair = getDefaultValueTimePair();
-    String firstData = defaultValueLongPair.getValue();
-    long firstTime = defaultValueLongPair.getTime();
-    String[] stringValues = blockValSet.getStringValuesSV();
-    long[] timeValues = timeValSet.getLongValuesSV();
-    for (int i = 0; i < length; i++) {
-      String data = stringValues[i];
-      long time = timeValues[i];
-      if (time <= firstTime) {
-        firstTime = time;
-        firstData = data;
-      }
-    }
-    setAggregationResult(aggregationResultHolder, firstData, firstTime);
+  public String readCell(BlockValSet block, int docId) {
+    return block.getStringValuesSV()[docId];
   }
 
   @Override
   public void aggregateGroupResultWithRawDataSv(int length, int[] groupKeyArray,
-      GroupByResultHolder groupByResultHolder,
-      BlockValSet blockValSet, BlockValSet timeValSet) {
+      GroupByResultHolder groupByResultHolder, BlockValSet blockValSet, BlockValSet timeValSet) {
     String[] stringValues = blockValSet.getStringValuesSV();
     long[] timeValues = timeValSet.getLongValuesSV();
-    for (int i = 0; i < length; i++) {
-      String data = stringValues[i];
-      long time = timeValues[i];
-      setGroupByResult(groupKeyArray[i], groupByResultHolder, data, time);
-    }
+
+    IntIterator nullIdxIterator = orNullIterator(blockValSet, timeValSet);
+    forEachNotNull(length, nullIdxIterator, (from, to) -> {
+      for (int i = from; i < to; i++) {
+        String data = stringValues[i];
+        long time = timeValues[i];
+        setGroupByResult(groupKeyArray[i], groupByResultHolder, data, time);
+      }
+    });
   }
 
   @Override
-  public void aggregateGroupResultWithRawDataMv(int length,
-      int[][] groupKeysArray,
-      GroupByResultHolder groupByResultHolder,
-      BlockValSet blockValSet,
-      BlockValSet timeValSet) {
+  public void aggregateGroupResultWithRawDataMv(int length, int[][] groupKeysArray,
+      GroupByResultHolder groupByResultHolder, BlockValSet blockValSet, BlockValSet timeValSet) {
     String[] stringValues = blockValSet.getStringValuesSV();
     long[] timeValues = timeValSet.getLongValuesSV();
-    for (int i = 0; i < length; i++) {
-      String value = stringValues[i];
-      long time = timeValues[i];
-      for (int groupKey : groupKeysArray[i]) {
-        setGroupByResult(groupKey, groupByResultHolder, value, time);
+
+    IntIterator nullIdxIterator = orNullIterator(blockValSet, timeValSet);
+    forEachNotNull(length, nullIdxIterator, (from, to) -> {
+      for (int i = from; i < to; i++) {
+        String value = stringValues[i];
+        long time = timeValues[i];
+        for (int groupKey : groupKeysArray[i]) {
+          setGroupByResult(groupKey, groupByResultHolder, value, time);
+        }
       }
-    }
+    });
   }
 
   @Override
   public String getResultColumnName() {
     return getType().getName().toLowerCase() + "(" + _expression + "," + _timeCol + ",'STRING')";
-  }
-
-  @Override
-  public String getColumnName() {
-    return getType().getName() + "_" + _expression + "_" + _timeCol + "_STRING";
   }
 
   @Override

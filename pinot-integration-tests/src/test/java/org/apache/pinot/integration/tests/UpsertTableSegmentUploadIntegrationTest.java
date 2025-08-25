@@ -74,7 +74,8 @@ public class UpsertTableSegmentUploadIntegrationTest extends BaseClusterIntegrat
     // Create and upload schema and table config
     Schema schema = createSchema();
     addSchema(schema);
-    TableConfig tableConfig = createUpsertTableConfig(avroFiles.get(0), PRIMARY_KEY_COL, getNumKafkaPartitions());
+    TableConfig tableConfig =
+        createUpsertTableConfig(avroFiles.get(0), PRIMARY_KEY_COL, null, getNumKafkaPartitions());
     addTableConfig(tableConfig);
 
     // Create and upload segments
@@ -116,17 +117,12 @@ public class UpsertTableSegmentUploadIntegrationTest extends BaseClusterIntegrat
 
   @Override
   protected String getSchemaFileName() {
-    return "upsert_table_test.schema";
-  }
-
-  @Override
-  protected String getSchemaName() {
-    return "upsertSchema";
+    return "upsert_upload_segment_test.schema";
   }
 
   @Override
   protected String getAvroTarFileName() {
-    return "upsert_test.tar.gz";
+    return "upsert_upload_segment_test.tar.gz";
   }
 
   @Override
@@ -195,7 +191,7 @@ public class UpsertTableSegmentUploadIntegrationTest extends BaseClusterIntegrat
       assertEquals(instanceStateMap.size(), 1);
       Map.Entry<String, String> instanceIdAndState = instanceStateMap.entrySet().iterator().next();
       String state = instanceIdAndState.getValue();
-      if (LLCSegmentName.isLowLevelConsumerSegmentName(segmentName)) {
+      if (LLCSegmentName.isLLCSegment(segmentName)) {
         assertEquals(state, SegmentStateModel.CONSUMING);
       } else {
         assertEquals(state, SegmentStateModel.ONLINE);

@@ -18,6 +18,9 @@
  */
 package org.apache.pinot.segment.local.aggregator;
 
+import java.util.List;
+import org.apache.datasketches.tuple.aninteger.IntegerSummary;
+import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
@@ -36,7 +39,8 @@ public class ValueAggregatorFactory {
    * @param aggregationType Aggregation type
    * @return Value aggregator
    */
-  public static ValueAggregator getValueAggregator(AggregationFunctionType aggregationType) {
+  public static ValueAggregator getValueAggregator(AggregationFunctionType aggregationType,
+      List<ExpressionContext> arguments) {
     switch (aggregationType) {
       case COUNT:
         return new CountValueAggregator();
@@ -47,7 +51,7 @@ public class ValueAggregatorFactory {
       case SUM:
         return new SumValueAggregator();
       case SUMPRECISION:
-        return new SumPrecisionValueAggregator();
+        return new SumPrecisionValueAggregator(arguments);
       case AVG:
         return new AvgValueAggregator();
       case MINMAXRANGE:
@@ -56,13 +60,30 @@ public class ValueAggregatorFactory {
         return new DistinctCountBitmapValueAggregator();
       case DISTINCTCOUNTHLL:
       case DISTINCTCOUNTRAWHLL:
-        return new DistinctCountHLLValueAggregator();
+        return new DistinctCountHLLValueAggregator(arguments);
       case PERCENTILEEST:
       case PERCENTILERAWEST:
         return new PercentileEstValueAggregator();
       case PERCENTILETDIGEST:
       case PERCENTILERAWTDIGEST:
         return new PercentileTDigestValueAggregator();
+      case DISTINCTCOUNTTHETASKETCH:
+      case DISTINCTCOUNTRAWTHETASKETCH:
+        return new DistinctCountThetaSketchValueAggregator();
+      case DISTINCTCOUNTHLLPLUS:
+      case DISTINCTCOUNTRAWHLLPLUS:
+        return new DistinctCountHLLPlusValueAggregator(arguments);
+      case DISTINCTCOUNTTUPLESKETCH:
+      case DISTINCTCOUNTRAWINTEGERSUMTUPLESKETCH:
+      case AVGVALUEINTEGERSUMTUPLESKETCH:
+      case SUMVALUESINTEGERSUMTUPLESKETCH:
+        return new IntegerTupleSketchValueAggregator(IntegerSummary.Mode.Sum);
+      case DISTINCTCOUNTCPCSKETCH:
+      case DISTINCTCOUNTRAWCPCSKETCH:
+        return new DistinctCountCPCSketchValueAggregator(arguments);
+      case DISTINCTCOUNTULL:
+      case DISTINCTCOUNTRAWULL:
+        return new DistinctCountULLValueAggregator(arguments);
       default:
         throw new IllegalStateException("Unsupported aggregation type: " + aggregationType);
     }
@@ -101,6 +122,23 @@ public class ValueAggregatorFactory {
       case PERCENTILETDIGEST:
       case PERCENTILERAWTDIGEST:
         return PercentileTDigestValueAggregator.AGGREGATED_VALUE_TYPE;
+      case DISTINCTCOUNTTHETASKETCH:
+      case DISTINCTCOUNTRAWTHETASKETCH:
+        return DistinctCountThetaSketchValueAggregator.AGGREGATED_VALUE_TYPE;
+      case DISTINCTCOUNTHLLPLUS:
+      case DISTINCTCOUNTRAWHLLPLUS:
+        return DistinctCountHLLPlusValueAggregator.AGGREGATED_VALUE_TYPE;
+      case DISTINCTCOUNTTUPLESKETCH:
+      case DISTINCTCOUNTRAWINTEGERSUMTUPLESKETCH:
+      case AVGVALUEINTEGERSUMTUPLESKETCH:
+      case SUMVALUESINTEGERSUMTUPLESKETCH:
+        return IntegerTupleSketchValueAggregator.AGGREGATED_VALUE_TYPE;
+      case DISTINCTCOUNTCPCSKETCH:
+      case DISTINCTCOUNTRAWCPCSKETCH:
+        return DistinctCountCPCSketchValueAggregator.AGGREGATED_VALUE_TYPE;
+      case DISTINCTCOUNTULL:
+      case DISTINCTCOUNTRAWULL:
+        return DistinctCountULLValueAggregator.AGGREGATED_VALUE_TYPE;
       default:
         throw new IllegalStateException("Unsupported aggregation type: " + aggregationType);
     }

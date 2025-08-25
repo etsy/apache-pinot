@@ -26,8 +26,8 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.predicate.EqPredicate;
 import org.apache.pinot.common.request.context.predicate.Predicate;
+import org.apache.pinot.core.common.BlockDocIdSet;
 import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.blocks.FilterBlock;
 import org.apache.pinot.core.operator.dociditerators.ScanBasedDocIdIterator;
 import org.apache.pinot.core.operator.docidsets.BitmapDocIdSet;
 import org.apache.pinot.core.query.request.context.QueryContext;
@@ -36,7 +36,6 @@ import org.apache.pinot.segment.local.utils.H3Utils;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.index.reader.H3IndexReader;
 import org.apache.pinot.spi.utils.BooleanUtils;
-import org.apache.pinot.spi.utils.BytesUtils;
 import org.locationtech.jts.geom.Geometry;
 import org.roaringbitmap.buffer.BufferFastAggregation;
 import org.roaringbitmap.buffer.ImmutableRoaringBitmap;
@@ -47,24 +46,22 @@ import org.roaringbitmap.buffer.MutableRoaringBitmap;
  * A filter operator that uses H3 index for geospatial data inclusion
  */
 public class H3InclusionIndexFilterOperator extends BaseFilterOperator {
-
   private static final String EXPLAIN_NAME = "INCLUSION_FILTER_H3_INDEX";
   private static final String LITERAL_H3_CELLS_CACHE_NAME = "st_contain_literal_h3_cells";
 
   private final IndexSegment _segment;
+  private final QueryContext _queryContext;
   private final Predicate _predicate;
-  private final int _numDocs;
   private final H3IndexReader _h3IndexReader;
   private final Geometry _geometry;
   private final boolean _isPositiveCheck;
-  private final QueryContext _queryContext;
 
-  public H3InclusionIndexFilterOperator(IndexSegment segment, Predicate predicate, QueryContext queryContext,
+  public H3InclusionIndexFilterOperator(IndexSegment segment, QueryContext queryContext, Predicate predicate,
       int numDocs) {
+    super(numDocs, false);
     _segment = segment;
-    _predicate = predicate;
-    _numDocs = numDocs;
     _queryContext = queryContext;
+    _predicate = predicate;
 
     List<ExpressionContext> arguments = predicate.getLhs().getFunction().getArguments();
     EqPredicate eqPredicate = (EqPredicate) predicate;
@@ -72,42 +69,40 @@ public class H3InclusionIndexFilterOperator extends BaseFilterOperator {
 
     if (arguments.get(0).getType() == ExpressionContext.Type.IDENTIFIER) {
       _h3IndexReader = segment.getDataSource(arguments.get(0).getIdentifier()).getH3Index();
-      _geometry = GeometrySerializer.deserialize(BytesUtils.toBytes(arguments.get(1).getLiteralString()));
+      _geometry = GeometrySerializer.deserialize(arguments.get(1).getLiteral().getBytesValue());
     } else {
       _h3IndexReader = segment.getDataSource(arguments.get(1).getIdentifier()).getH3Index();
-      _geometry = GeometrySerializer.deserialize(BytesUtils.toBytes(arguments.get(0).getLiteralString()));
+      _geometry = GeometrySerializer.deserialize(arguments.get(0).getLiteral().getBytesValue());
     }
     // must be some h3 index
     assert _h3IndexReader != null : "the column must have H3 index setup.";
   }
 
   @Override
-  protected FilterBlock getNextBlock() {
-    // get the set of H3 cells at the specified resolution which completely cover the input shape and potential cover.
-    Pair<LongSet, LongSet> fullCoverAndPotentialCoverCells = _queryContext
-        .getOrComputeSharedValue(Pair.class, LITERAL_H3_CELLS_CACHE_NAME,
+  protected BlockDocIdSet getTrues() {
+    // NOTE: LHS is the fully covered cells, RHS is the potentially covered cells (excluding fully covered cells).
+    Pair<LongSet, LongSet> fullyAndPotentiallyCoveredCells =
+        _queryContext.getOrComputeSharedValue(Pair.class, LITERAL_H3_CELLS_CACHE_NAME,
             k -> H3Utils.coverGeometryInH3(_geometry, _h3IndexReader.getH3IndexResolution().getLowestResolution()));
 
-    LongSet fullyCoverH3Cells = fullCoverAndPotentialCoverCells.getLeft();
-    LongSet potentialCoverH3Cells = fullCoverAndPotentialCoverCells.getRight();
+    LongSet fullyCoveredCells = fullyAndPotentiallyCoveredCells.getLeft();
+    LongSet potentiallyCoveredCells = fullyAndPotentiallyCoveredCells.getRight();
 
-    int i = 0;
-    ImmutableRoaringBitmap[] fullMatchDocIds = new ImmutableRoaringBitmap[fullyCoverH3Cells.size()];
-    LongIterator fullyCoverH3CellsIterator = fullyCoverH3Cells.iterator();
-    while (fullyCoverH3CellsIterator.hasNext()) {
-      fullMatchDocIds[i++] = _h3IndexReader.getDocIds(fullyCoverH3CellsIterator.nextLong());
+    int numFullyCoveredCells = fullyCoveredCells.size();
+    ImmutableRoaringBitmap[] fullMatchDocIds = new ImmutableRoaringBitmap[numFullyCoveredCells];
+    LongIterator fullyCoveredCellsIterator = fullyCoveredCells.iterator();
+    for (int i = 0; i < numFullyCoveredCells; i++) {
+      fullMatchDocIds[i] = _h3IndexReader.getDocIds(fullyCoveredCellsIterator.nextLong());
     }
     MutableRoaringBitmap fullMatch = BufferFastAggregation.or(fullMatchDocIds);
 
-    // remove full match from potential match to get potential not match cells.
-    i = 0;
-    potentialCoverH3Cells.removeAll(fullyCoverH3Cells);
-    ImmutableRoaringBitmap[] potentialNotMatchDocIds = new ImmutableRoaringBitmap[potentialCoverH3Cells.size()];
-    LongIterator potentialMatchH3CellsIterator = potentialCoverH3Cells.iterator();
-    while (potentialMatchH3CellsIterator.hasNext()) {
-      potentialNotMatchDocIds[i++] = _h3IndexReader.getDocIds(potentialMatchH3CellsIterator.nextLong());
+    int numPotentiallyCoveredCells = potentiallyCoveredCells.size();
+    ImmutableRoaringBitmap[] potentialMatchDocIds = new ImmutableRoaringBitmap[numPotentiallyCoveredCells];
+    LongIterator potentiallyCoveredCellsIterator = potentiallyCoveredCells.iterator();
+    for (int i = 0; i < numPotentiallyCoveredCells; i++) {
+      potentialMatchDocIds[i] = _h3IndexReader.getDocIds(potentiallyCoveredCellsIterator.nextLong());
     }
-    MutableRoaringBitmap potentialMatch = BufferFastAggregation.or(potentialNotMatchDocIds);
+    MutableRoaringBitmap potentialMatch = BufferFastAggregation.or(potentialMatchDocIds);
 
     if (_isPositiveCheck) {
       return getFilterBlock(fullMatch, potentialMatch);
@@ -122,20 +117,20 @@ public class H3InclusionIndexFilterOperator extends BaseFilterOperator {
   }
 
   /**
-   * Returns the filter block based on the given the partial match doc ids.
+   * Returns the filter block document IDs based on the given the partial match doc ids.
    */
-  private FilterBlock getFilterBlock(MutableRoaringBitmap fullMatchDocIds, MutableRoaringBitmap partialMatchDocIds) {
-    ExpressionFilterOperator expressionFilterOperator = new ExpressionFilterOperator(_segment, _predicate, _numDocs);
-    ScanBasedDocIdIterator docIdIterator =
-        (ScanBasedDocIdIterator) expressionFilterOperator.getNextBlock().getBlockDocIdSet().iterator();
+  private BlockDocIdSet getFilterBlock(MutableRoaringBitmap fullMatchDocIds, MutableRoaringBitmap partialMatchDocIds) {
+    ExpressionFilterOperator expressionFilterOperator =
+        new ExpressionFilterOperator(_segment, _queryContext, _predicate, _numDocs);
+    ScanBasedDocIdIterator docIdIterator = (ScanBasedDocIdIterator) expressionFilterOperator.getTrues().iterator();
     MutableRoaringBitmap result = docIdIterator.applyAnd(partialMatchDocIds);
     result.or(fullMatchDocIds);
-    return new FilterBlock(new BitmapDocIdSet(result, _numDocs) {
+    return new BitmapDocIdSet(result, _numDocs) {
       @Override
       public long getNumEntriesScannedInFilter() {
         return docIdIterator.getNumEntriesScanned();
       }
-    });
+    };
   }
 
   @Override

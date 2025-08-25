@@ -37,12 +37,22 @@ public class PercentileRawTDigestAggregationFunction
     extends BaseSingleInputAggregationFunction<TDigest, SerializedTDigest> {
   private final PercentileTDigestAggregationFunction _percentileTDigestAggregationFunction;
 
-  public PercentileRawTDigestAggregationFunction(ExpressionContext expressionContext, int percentile) {
-    this(expressionContext, new PercentileTDigestAggregationFunction(expressionContext, percentile));
+  public PercentileRawTDigestAggregationFunction(ExpressionContext expressionContext, int percentile,
+      boolean nullHandlingEnabled) {
+    this(expressionContext, new PercentileTDigestAggregationFunction(expressionContext, percentile,
+        nullHandlingEnabled));
   }
 
-  public PercentileRawTDigestAggregationFunction(ExpressionContext expressionContext, double percentile) {
-    this(expressionContext, new PercentileTDigestAggregationFunction(expressionContext, percentile));
+  public PercentileRawTDigestAggregationFunction(ExpressionContext expressionContext, double percentile,
+      boolean nullHandlingEnabled) {
+    this(expressionContext, new PercentileTDigestAggregationFunction(expressionContext, percentile,
+        nullHandlingEnabled));
+  }
+
+  public PercentileRawTDigestAggregationFunction(ExpressionContext expressionContext, double percentile,
+      int compressionFactor, boolean nullHandlingEnabled) {
+    this(expressionContext, new PercentileTDigestAggregationFunction(expressionContext, percentile, compressionFactor,
+        nullHandlingEnabled));
   }
 
   protected PercentileRawTDigestAggregationFunction(ExpressionContext expression,
@@ -57,22 +67,16 @@ public class PercentileRawTDigestAggregationFunction
   }
 
   @Override
-  public String getColumnName() {
-    final double percentile = _percentileTDigestAggregationFunction._percentile;
-    final int version = _percentileTDigestAggregationFunction._version;
-    final String type = getType().getName();
-
-    return version == 0 ? type + (int) percentile + "_" + _expression : type + percentile + "_" + _expression;
-  }
-
-  @Override
   public String getResultColumnName() {
     final double percentile = _percentileTDigestAggregationFunction._percentile;
+    final int compressionFactor = _percentileTDigestAggregationFunction._compressionFactor;
     final int version = _percentileTDigestAggregationFunction._version;
     final String type = getType().getName().toLowerCase();
 
     return version == 0 ? type + (int) percentile + "(" + _expression + ")"
-        : type + "(" + _expression + ", " + percentile + ")";
+        : (((compressionFactor == PercentileTDigestAggregationFunction.DEFAULT_TDIGEST_COMPRESSION))
+            ? (type + "(" + _expression + ", " + percentile + ")")
+            : (type + "(" + _expression + ", " + percentile + ", " + compressionFactor + ")"));
   }
 
   @Override

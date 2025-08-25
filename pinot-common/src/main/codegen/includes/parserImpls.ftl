@@ -33,7 +33,7 @@ private void DataFileDef(List<SqlNode> list) :
 SqlNodeList DataFileDefList() :
 {
     SqlParserPos pos;
-    List<SqlNode> list = Lists.newArrayList();
+    List<SqlNode> list = new ArrayList<SqlNode>();
 }
 {
     <FROM> { pos = getPos(); }
@@ -73,36 +73,6 @@ SqlInsertFromFile SqlInsertFromFile() :
     }
 }
 
-/**
- * define the rest of the sql into SqlStmtList
- */
-private void SqlStatementList(SqlNodeList list) :
-{
-}
-{
-    {
-        list.add(SqlStmt());
-    }
-}
-
-SqlNodeList SqlStmtsEof() :
-{
-    SqlParserPos pos;
-    SqlNodeList stmts;
-}
-{
-    {
-        pos = getPos();
-        stmts = new SqlNodeList(pos);
-        stmts.add(SqlStmt());
-    }
-    ( LOOKAHEAD(2, <SEMICOLON> SqlStmt()) <SEMICOLON> SqlStatementList(stmts) )*
-    [ <SEMICOLON> ] <EOF>
-    {
-        return stmts;
-    }
-}
-
 void SqlAtTimeZone(List<Object> list, ExprContext exprContext, Span s) :
 {
     List<Object> list2;
@@ -117,5 +87,25 @@ void SqlAtTimeZone(List<Object> list, ExprContext exprContext, Span s) :
     list2 = Expression2(ExprContext.ACCEPT_SUB_QUERY) {
         list.add(new SqlParserUtil.ToTreeListItem(op, s.pos()));
         list.addAll(list2);
+    }
+}
+
+SqlNode SqlPhysicalExplain() :
+{
+    SqlNode stmt;
+    SqlExplainLevel detailLevel = SqlExplainLevel.EXPPLAN_ATTRIBUTES;
+    SqlExplain.Depth depth = SqlExplain.Depth.PHYSICAL;
+    final SqlExplainFormat format = SqlExplainFormat.TEXT;
+}
+{
+    <EXPLAIN> <IMPLEMENTATION> <PLAN>
+    [ detailLevel = ExplainDetailLevel() ]
+    <FOR> stmt = SqlQueryOrDml() {
+        return new SqlPhysicalExplain(getPos(),
+            stmt,
+            detailLevel.symbol(SqlParserPos.ZERO),
+            depth.symbol(SqlParserPos.ZERO),
+            format.symbol(SqlParserPos.ZERO),
+            nDynamicParams);
     }
 }

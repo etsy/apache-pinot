@@ -29,11 +29,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.data.table.Record;
 import org.apache.pinot.core.data.table.Table;
 import org.apache.pinot.core.operator.blocks.results.GroupByResultsBlock;
 import org.apache.pinot.core.operator.combine.GroupByCombineOperator;
-import org.apache.pinot.core.operator.query.GroupByOperator;
 import org.apache.pinot.core.plan.GroupByPlanNode;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
@@ -41,6 +41,7 @@ import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoa
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -50,12 +51,11 @@ import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
+import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
-
-import static org.testng.Assert.assertEquals;
 
 
 /**
@@ -120,7 +120,8 @@ public class GroupByTrimTest {
     queryContext.setMinServerGroupTrimSize(minServerGroupTrimSize);
 
     // Create a query operator
-    GroupByOperator groupByOperator = new GroupByPlanNode(_indexSegment, queryContext).run();
+    Operator<GroupByResultsBlock> groupByOperator =
+        new GroupByPlanNode(new SegmentContext(_indexSegment), queryContext).run();
     GroupByCombineOperator combineOperator =
         new GroupByCombineOperator(Collections.singletonList(groupByOperator), queryContext, _executorService);
 
@@ -130,7 +131,7 @@ public class GroupByTrimTest {
     // Extract the execution result
     List<Pair<Double, Double>> extractedResult = extractTestResult(resultsBlock.getTable());
 
-    assertEquals(extractedResult, expectedResult);
+    Assert.assertEquals(extractedResult, expectedResult);
   }
 
   /**

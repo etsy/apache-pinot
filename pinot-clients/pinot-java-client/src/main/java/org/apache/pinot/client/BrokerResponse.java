@@ -24,7 +24,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 /**
  * Reimplementation of BrokerResponse from pinot-common, so that pinot-api does not depend on pinot-common.
  */
-class BrokerResponse {
+public class BrokerResponse {
+  private String _requestId;
+  private String _brokerId;
   private JsonNode _aggregationResults;
   private JsonNode _selectionResults;
   private JsonNode _resultTable;
@@ -35,6 +37,8 @@ class BrokerResponse {
   }
 
   private BrokerResponse(JsonNode brokerResponse) {
+    _requestId = brokerResponse.get("requestId") != null ? brokerResponse.get("requestId").asText() : "unknown";
+    _brokerId = brokerResponse.get("brokerId") != null ? brokerResponse.get("brokerId").asText() : "unknown";
     _aggregationResults = brokerResponse.get("aggregationResults");
     _exceptions = brokerResponse.get("exceptions");
     _selectionResults = brokerResponse.get("selectionResults");
@@ -42,27 +46,27 @@ class BrokerResponse {
     _executionStats = ExecutionStats.fromJson(brokerResponse);
   }
 
-  boolean hasExceptions() {
+  public boolean hasExceptions() {
     return _exceptions != null && !_exceptions.isEmpty();
   }
 
-  JsonNode getExceptions() {
+  public JsonNode getExceptions() {
     return _exceptions;
   }
 
-  JsonNode getAggregationResults() {
+  public JsonNode getAggregationResults() {
     return _aggregationResults;
   }
 
-  JsonNode getSelectionResults() {
+  public JsonNode getSelectionResults() {
     return _selectionResults;
   }
 
-  JsonNode getResultTable() {
+  public JsonNode getResultTable() {
     return _resultTable;
   }
 
-  int getAggregationResultsSize() {
+  public int getAggregationResultsSize() {
     if (_aggregationResults == null) {
       return 0;
     } else {
@@ -70,15 +74,23 @@ class BrokerResponse {
     }
   }
 
-  ExecutionStats getExecutionStats() {
+  public ExecutionStats getExecutionStats() {
     return _executionStats;
   }
 
-  static BrokerResponse fromJson(JsonNode json) {
+  public static BrokerResponse fromJson(JsonNode json) {
     return new BrokerResponse(json);
   }
 
-  static BrokerResponse empty() {
+  public static BrokerResponse empty() {
     return new BrokerResponse();
+  }
+
+  public String getRequestId() {
+    return _requestId;
+  }
+
+  public String getBrokerId() {
+    return _brokerId;
   }
 }

@@ -45,14 +45,15 @@ public class JsonAsyncHttpPinotClientTransportFactory implements PinotClientTran
   private int _handshakeTimeoutMs = Integer.parseInt(DEFAULT_BROKER_HANDSHAKE_TIMEOUT_MS);
   private String _appId = null;
   private String _extraOptionString;
+  private boolean _useMultistageEngine;
 
   @Override
   public PinotClientTransport buildTransport() {
     ConnectionTimeouts connectionTimeouts =
         ConnectionTimeouts.create(_readTimeoutMs, _connectTimeoutMs, _handshakeTimeoutMs);
     TlsProtocols tlsProtocols = TlsProtocols.defaultProtocols(_tlsV10Enabled);
-    return new JsonAsyncHttpPinotClientTransport(_headers, _scheme, _extraOptionString, _sslContext, connectionTimeouts,
-        tlsProtocols, _appId);
+    return new JsonAsyncHttpPinotClientTransport(_headers, _scheme, _extraOptionString, _useMultistageEngine,
+        _sslContext, connectionTimeouts, tlsProtocols, _appId);
   }
 
   public Map<String, String> getHeaders() {
@@ -84,8 +85,9 @@ public class JsonAsyncHttpPinotClientTransportFactory implements PinotClientTran
       _headers = ConnectionUtils.getHeadersFromProperties(properties);
     }
 
-    if (_scheme == null) {
-      _scheme = properties.getProperty("scheme", CommonConstants.HTTP_PROTOCOL);
+    String scheme = properties.getProperty("scheme", CommonConstants.HTTP_PROTOCOL);
+    if (_scheme == null || !_scheme.contentEquals(scheme)) {
+      _scheme = scheme;
     }
 
     if (_sslContext == null && _scheme.contentEquals(CommonConstants.HTTPS_PROTOCOL)) {
@@ -103,6 +105,7 @@ public class JsonAsyncHttpPinotClientTransportFactory implements PinotClientTran
         System.getProperties().getProperty("broker.tlsV10Enabled", DEFAULT_BROKER_TLS_V10_ENABLED));
 
     _extraOptionString = properties.getProperty("queryOptions", "");
+    _useMultistageEngine = Boolean.parseBoolean(properties.getProperty("useMultistageEngine", "false"));
     return this;
   }
 }

@@ -23,8 +23,8 @@ import java.io.File;
 import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.local.segment.index.loader.LoaderUtils;
 import org.apache.pinot.segment.spi.V1Constants;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
-import org.apache.pinot.segment.spi.store.ColumnIndexType;
 import org.apache.pinot.segment.spi.store.SegmentDirectory;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
@@ -65,31 +65,43 @@ public class V3DefaultColumnHandler extends BaseDefaultColumnHandler {
     boolean forwardIndexDisabled = !isSingleValue && isForwardIndexDisabled(column);
     File forwardIndexFile = null;
     File invertedIndexFile = null;
+
     if (isSingleValue) {
       forwardIndexFile = new File(_indexDir, column + V1Constants.Indexes.SORTED_SV_FORWARD_INDEX_FILE_EXTENSION);
       if (!forwardIndexFile.exists()) {
         forwardIndexFile = new File(_indexDir, column + V1Constants.Indexes.UNSORTED_SV_FORWARD_INDEX_FILE_EXTENSION);
       }
+      if (!forwardIndexFile.exists()) {
+        forwardIndexFile = new File(_indexDir, column + V1Constants.Indexes.RAW_SV_FORWARD_INDEX_FILE_EXTENSION);
+      }
     } else {
       if (forwardIndexDisabled) {
         // An inverted index is created instead of forward index for multi-value columns with forward index disabled
+        // Note that we don't currently support creation of forward index disabled derived columns
         invertedIndexFile = new File(_indexDir, column + V1Constants.Indexes.BITMAP_INVERTED_INDEX_FILE_EXTENSION);
       } else {
         forwardIndexFile = new File(_indexDir, column + V1Constants.Indexes.UNSORTED_MV_FORWARD_INDEX_FILE_EXTENSION);
+        if (!forwardIndexFile.exists()) {
+          forwardIndexFile = new File(_indexDir, column + V1Constants.Indexes.RAW_MV_FORWARD_INDEX_FILE_EXTENSION);
+        }
       }
     }
+
     if (forwardIndexFile != null) {
-      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, forwardIndexFile, ColumnIndexType.FORWARD_INDEX);
+      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, forwardIndexFile, StandardIndexes.forward());
     }
     if (invertedIndexFile != null) {
-      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, invertedIndexFile, ColumnIndexType.INVERTED_INDEX);
+      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, invertedIndexFile, StandardIndexes.inverted());
     }
+
     File dictionaryFile = new File(_indexDir, column + V1Constants.Dict.FILE_EXTENSION);
-    LoaderUtils.writeIndexToV3Format(_segmentWriter, column, dictionaryFile, ColumnIndexType.DICTIONARY);
+    if (dictionaryFile.exists()) {
+      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, dictionaryFile, StandardIndexes.dictionary());
+    }
 
     File nullValueVectorFile = new File(_indexDir, column + V1Constants.Indexes.NULLVALUE_VECTOR_FILE_EXTENSION);
     if (nullValueVectorFile.exists()) {
-      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, nullValueVectorFile, ColumnIndexType.NULLVALUE_VECTOR);
+      LoaderUtils.writeIndexToV3Format(_segmentWriter, column, nullValueVectorFile, StandardIndexes.nullValueVector());
     }
     return true;
   }

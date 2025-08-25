@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.query.aggregation.function;
 
+import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.utils.DataSchema;
@@ -36,11 +37,11 @@ public class FourthMomentAggregationFunction extends BaseSingleInputAggregationF
   private final Type _type;
 
   enum Type {
-    KURTOSIS, SKEWNESS
+    KURTOSIS, SKEWNESS, MOMENT
   }
 
-  public FourthMomentAggregationFunction(ExpressionContext expression, Type type) {
-    super(expression);
+  public FourthMomentAggregationFunction(List<ExpressionContext> arguments, Type type) {
+    super(verifySingleArgument(arguments, type.name()));
     _type = type;
   }
 
@@ -51,6 +52,8 @@ public class FourthMomentAggregationFunction extends BaseSingleInputAggregationF
         return AggregationFunctionType.KURTOSIS;
       case SKEWNESS:
         return AggregationFunctionType.SKEWNESS;
+      case MOMENT:
+        return AggregationFunctionType.FOURTHMOMENT;
       default:
         throw new IllegalArgumentException("Unexpected type " + _type);
     }
@@ -159,6 +162,10 @@ public class FourthMomentAggregationFunction extends BaseSingleInputAggregationF
         return m4.kurtosis();
       case SKEWNESS:
         return m4.skew();
+      case MOMENT:
+        // this should never happen, as we're not extracting
+        // final result when using this method
+        throw new UnsupportedOperationException("Fourth moment cannot be used as aggregation function directly");
       default:
         throw new IllegalStateException("Unexpected value: " + _type);
     }

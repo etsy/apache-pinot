@@ -21,7 +21,8 @@ package org.apache.pinot.tools.admin.command;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.common.utils.tls.TlsUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.ingestion.batch.IngestionJobLauncher;
 import org.apache.pinot.spi.ingestion.batch.spec.SegmentGenerationJobSpec;
@@ -123,7 +124,8 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
     }
 
     if (StringUtils.isBlank(spec.getAuthToken())) {
-      spec.setAuthToken(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password).getTaskToken());
+      spec.setAuthToken(AuthProviderUtils.makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password)
+          .getTaskToken());
     }
 
     try {
@@ -160,6 +162,9 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
   public static void main(String[] args) {
     PluginManager.get().init();
     int exitCode = new CommandLine(new LaunchDataIngestionJobCommand()).execute(args);
-    System.exit(exitCode);
+    if ((exitCode != 0)
+        || Boolean.parseBoolean(System.getProperties().getProperty("pinot.admin.system.exit"))) {
+      System.exit(exitCode);
+    }
   }
 }

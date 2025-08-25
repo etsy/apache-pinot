@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.queries;
 
+import com.google.common.collect.ImmutableMap;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -61,10 +62,14 @@ import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoa
 import org.apache.pinot.segment.local.realtime.impl.invertedindex.RealtimeLuceneTextIndex;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
+import org.apache.pinot.segment.local.segment.index.text.TextIndexConfigBuilder;
 import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
+import org.apache.pinot.segment.spi.index.FieldIndexConfigs;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
+import org.apache.pinot.segment.spi.index.TextIndexConfig;
 import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
@@ -148,6 +153,7 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
     props = new HashMap<>();
     props.put(FieldConfig.TEXT_INDEX_STOP_WORD_INCLUDE_KEY, "coordinator");
     props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "it, those");
+    props.put(FieldConfig.TEXT_INDEX_ENABLE_PREFIX_SUFFIX_PHRASE_QUERIES, "true");
     columnProperties.put(SKILLS_TEXT_COL_NAME, props);
     props = new HashMap<>();
     props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "");
@@ -195,24 +201,34 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
     config.setOutDir(INDEX_DIR.getPath());
     config.setTableName(TABLE_NAME);
     config.setSegmentName(SEGMENT_NAME);
-    Map<String, Map<String, String>> columnProperties = new HashMap<>();
-    Map<String, String> props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_NO_RAW_DATA, "true");
-    props.put(FieldConfig.TEXT_INDEX_RAW_VALUE, "ILoveCoding");
-    columnProperties.put(SKILLS_TEXT_NO_RAW_NAME, props);
-    props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_INCLUDE_KEY, "coordinator");
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "it, those");
-    columnProperties.put(SKILLS_TEXT_COL_NAME, props);
-    props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "");
-    columnProperties.put(SKILLS_TEXT_COL_DICT_NAME, props);
-    config.setColumnProperties(columnProperties);
+    addTextIndexProp(config, SKILLS_TEXT_NO_RAW_NAME, ImmutableMap.<String, String>builder()
+        .put(FieldConfig.TEXT_INDEX_NO_RAW_DATA, "true")
+        .put(FieldConfig.TEXT_INDEX_RAW_VALUE, "ILoveCoding")
+        .build());
+    addTextIndexProp(config, SKILLS_TEXT_COL_NAME, ImmutableMap.<String, String>builder()
+        .put(FieldConfig.TEXT_INDEX_STOP_WORD_INCLUDE_KEY, "coordinator")
+        .put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "it, those")
+        .put(FieldConfig.TEXT_INDEX_ENABLE_PREFIX_SUFFIX_PHRASE_QUERIES, "true")
+        .build());
+    addTextIndexProp(config, SKILLS_TEXT_COL_DICT_NAME,
+        Collections.singletonMap(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, ""));
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
     try (RecordReader recordReader = new GenericRowRecordReader(rows)) {
       driver.init(config, recordReader);
       driver.build();
     }
+  }
+
+
+  private void addTextIndexProp(SegmentGeneratorConfig config, String colName, Map<String, String> propMap) {
+    FieldIndexConfigs fieldIndexConfigs = config.getIndexConfigsByColName().get(colName);
+    TextIndexConfig textConfig = fieldIndexConfigs.getConfig(StandardIndexes.text());
+
+    TextIndexConfig newTextConfig = new TextIndexConfigBuilder(textConfig)
+        .withProperties(propMap)
+        .build();
+
+    config.setIndexOn(StandardIndexes.text(), newTextConfig, colName);
   }
 
   private List<GenericRow> createTestData()
@@ -264,6 +280,44 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
     assertEquals(counter, 24150);
 
     return rows;
+  }
+
+  @Test
+  public void testMultiTermRegexSearch()
+      throws Exception {
+    // Search in SKILLS_TEXT_COL column to look for documents that have the /.*ealtime stream system.*/ regex pattern
+    List<Object[]> expected = new ArrayList<>();
+    expected.add(new Object[]{1010,
+        "Distributed systems, Java, realtime streaming systems, Machine learning, spark, Kubernetes, distributed "
+            + "storage, concurrency, multi-threading"});
+    expected.add(new Object[]{1019,
+        "C++, Java, Python, realtime streaming systems, Machine learning, spark, Kubernetes, transaction processing, "
+            + "distributed storage, concurrency, multi-threading, apache airflow"});
+
+    String query =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ealtime streaming system*') "
+            + "LIMIT 50000";
+    testTextSearchSelectQueryHelper(query, expected.size(), false, expected);
+
+    // Search /*java realtime stream system*, only 1 result left./
+    List<Object[]> expected1 = new ArrayList<>();
+    expected1.add(new Object[]{1010,
+        "Distributed systems, Java, realtime streaming systems, Machine learning, spark, Kubernetes, distributed "
+            + "storage, concurrency, multi-threading"});
+    String query1 =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ava realtime streaming "
+            + "system*') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query1, expected1.size(), false, expected1);
+
+    String query2 =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ava realtime streaming "
+            + "system* AND *chine learn*') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query2, expected1.size(), false, expected1);
+
+    String query3 =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ava realtime streaming "
+            + "system* AND *chine learner*') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query3, 0, false, new ArrayList<>());
   }
 
   /**
@@ -1314,6 +1368,24 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
         "SELECT COUNT(*) FROM MyTable WHERE SKILLS_TEXT_COL_DICT = 'Machine learning, Tensor flow, Java, Stanford "
             + "university,' OR TEXT_MATCH(SKILLS_TEXT_COL_DICT, '\"machine learning\"') LIMIT 50000";
     testTextSearchAggregationQueryHelper(query, expected.size());
+  }
+
+  /**
+   * Test NotFilterOperator with index based doc id iterator (text_match)
+   * @throws Exception
+   */
+  @Test
+  public void testTextSearchWithInverse()
+      throws Exception {
+
+    // all skills except the first 28 in createTestData contain 'software engineering' or ('software' and 'engineering')
+    List<Object[]> expected = new ArrayList<>();
+    for (int i = 0; i < 28; i++) {
+      expected.add(new Object[]{1000 + i});
+    }
+
+    String query = "SELECT INT_COL FROM MyTable WHERE NOT TEXT_MATCH(SKILLS_TEXT_COL, 'software') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query, 28, false, expected);
   }
 
   /**

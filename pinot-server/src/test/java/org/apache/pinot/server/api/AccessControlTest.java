@@ -30,9 +30,11 @@ import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
 import org.apache.commons.io.FileUtils;
+import org.apache.helix.HelixManager;
+import org.apache.pinot.common.auth.BasicAuthUtils;
 import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.metrics.ServerMetrics;
-import org.apache.pinot.core.auth.BasicAuthUtils;
+import org.apache.pinot.core.transport.HttpServerThreadPoolConfig;
 import org.apache.pinot.core.transport.ListenerConfig;
 import org.apache.pinot.server.access.AccessControl;
 import org.apache.pinot.server.access.AccessControlFactory;
@@ -41,7 +43,6 @@ import org.apache.pinot.server.access.GrpcRequesterIdentity;
 import org.apache.pinot.server.access.HttpRequesterIdentity;
 import org.apache.pinot.server.access.RequesterIdentity;
 import org.apache.pinot.server.starter.ServerInstance;
-import org.apache.pinot.server.starter.helix.DefaultHelixStarterServerConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.NetUtils;
@@ -73,8 +74,9 @@ public class AccessControlTest {
     // Mock the server instance
     ServerInstance serverInstance = mock(ServerInstance.class);
     when(serverInstance.getServerMetrics()).thenReturn(mock(ServerMetrics.class));
+    when(serverInstance.getHelixManager()).thenReturn(mock(HelixManager.class));
 
-    PinotConfiguration serverConf = DefaultHelixStarterServerConfig.loadDefaultServerConf();
+    PinotConfiguration serverConf = new PinotConfiguration();
     String hostname = serverConf.getProperty(CommonConstants.Helix.KEY_OF_SERVER_NETTY_HOST,
         serverConf.getProperty(CommonConstants.Helix.SET_INSTANCE_ID_TO_HOSTNAME_KEY, false)
             ? NetUtils.getHostnameOrAddress() : NetUtils.getHostAddress());
@@ -87,7 +89,7 @@ public class AccessControlTest {
     int adminApiApplicationPort = getAvailablePort();
     _adminApiApplication.start(Collections.singletonList(
         new ListenerConfig(CommonConstants.HTTP_PROTOCOL, "0.0.0.0", adminApiApplicationPort,
-            CommonConstants.HTTP_PROTOCOL, new TlsConfig())));
+            CommonConstants.HTTP_PROTOCOL, new TlsConfig(), HttpServerThreadPoolConfig.defaultInstance())));
 
     _webTarget = ClientBuilder.newClient().target(
         String.format("http://%s:%d", NetUtils.getHostAddress(), adminApiApplicationPort));
@@ -143,7 +145,8 @@ public class AccessControlTest {
   public void testHttpBasicAuth() {
     HttpHeaders headers = new ContainerRequest(null, null, null, null, new MapPropertiesDelegate());
     headers.getRequestHeaders()
-        .put("authorization", Arrays.asList(BasicAuthUtils.toBasicAuthToken("admin123", "verysecret")));
+        .put("authorization", Arrays.asList(
+            org.apache.pinot.common.auth.BasicAuthUtils.toBasicAuthToken("admin123", "verysecret")));
     testBasicAuth(new HttpRequesterIdentity(headers), true);
     headers.getRequestHeaders()
         .put("authorization", Arrays.asList(BasicAuthUtils.toBasicAuthToken("user456", "kindasecret")));

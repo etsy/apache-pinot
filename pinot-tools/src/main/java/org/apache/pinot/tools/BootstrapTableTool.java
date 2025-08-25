@@ -31,9 +31,10 @@ import java.net.URL;
 import java.util.List;
 import java.util.Map;
 import org.apache.commons.io.FileUtils;
+import org.apache.http.HttpException;
 import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.common.minion.MinionClient;
-import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.common.utils.tls.TlsUtils;
 import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableConfig;
@@ -195,7 +196,7 @@ public class BootstrapTableTool {
 
   private boolean setupOfflineData(File setupTableTmpDir, TableConfig tableConfig, String tableName,
       File ingestionJobSpecFile)
-      throws IOException {
+      throws IOException, HttpException {
     if (tableConfig.getTaskConfig() != null && tableConfig.getTaskConfig()
         .isTaskTypeEnabled(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE)) {
       final Map<String, String> scheduledTasks =

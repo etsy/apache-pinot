@@ -26,7 +26,7 @@
       "tbl2" : {
         "schema": [
           {"name": "num", "type": "INT"},
-          {"name": "value", "type": "STRING"}
+          {"name": "val", "type": "STRING"}
         ],
         "inputs": [
           [1, "xxx"],
@@ -68,17 +68,17 @@
       {
         "psql": "7.2.1.1",
         "description": "LEFT OUTER JOIN with non-join related clause",
-        "sql": "SELECT * FROM {tbl1} LEFT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num AND {tbl2}.value = 'xxx'"
+        "sql": "SELECT * FROM {tbl1} LEFT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num AND {tbl2}.val = 'xxx'"
       },
       {
         "psql": "7.2.1.1",
         "description": "LEFT OUTER JOIN with inequality condition",
-        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.value FROM {tbl2} LEFT OUTER JOIN {tbl1} ON {tbl1}.num = {tbl2}.num AND {tbl1}.name != {tbl2}.value"
+        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.val FROM {tbl2} LEFT OUTER JOIN {tbl1} ON {tbl1}.num = {tbl2}.num AND {tbl1}.name != {tbl2}.val"
       },
       {
         "psql": "7.2.1.1",
         "description": "LEFT OUTER JOIN with inequality condition",
-        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.value FROM {tbl2} LEFT OUTER JOIN {tbl1} ON {tbl1}.name = {tbl2}.value AND {tbl1}.num > {tbl2}.num + 1"
+        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.val FROM {tbl2} LEFT OUTER JOIN {tbl1} ON {tbl1}.name = {tbl2}.val AND {tbl1}.num > {tbl2}.num + 1"
       },
       {
         "psql": "7.2.1.1",
@@ -89,27 +89,27 @@
         "psql": "7.2.1.1",
         "comments": "select all doesn't work because h2 output the rows in different order from Pinot and test framework doesn't consider the column order for rows and blindly assume they are in the same order",
         "description": "RIGHT OUTER JOIN",
-        "sql": "SELECT {tbl1}.num, {tbl1}.name, {tbl2}.num, {tbl2}.value FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num"
+        "sql": "SELECT {tbl1}.num, {tbl1}.name, {tbl2}.num, {tbl2}.val FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num"
       },
       {
         "psql": "7.2.1.1",
         "description": "RIGHT OUTER JOIN output rows in different order than join order",
-        "sql": "SELECT {tbl2}.num, {tbl2}.value, {tbl1}.num, {tbl1}.name FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num"
+        "sql": "SELECT {tbl2}.num, {tbl2}.val, {tbl1}.num, {tbl1}.name FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num"
       },
       {
         "psql": "7.2.1.1",
         "description": "RIGHT OUTER JOIN output rows in mixed table order",
-        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.value FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num"
+        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.val FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num"
       },
       {
         "psql": "7.2.1.1",
         "description": "RIGHT OUTER JOIN with inequality condition",
-        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.value FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num AND {tbl1}.name != {tbl2}.value"
+        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.val FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num AND {tbl1}.name != {tbl2}.val"
       },
       {
         "psql": "7.2.1.1",
         "description": "RIGHT OUTER JOIN with inequality condition",
-        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.value FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.name = {tbl2}.value AND {tbl1}.num > {tbl2}.num + 1"
+        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.val FROM {tbl1} RIGHT OUTER JOIN {tbl2} ON {tbl1}.name = {tbl2}.val AND {tbl1}.num > {tbl2}.num + 1"
       },
       {
         "psql": "7.2.1.1",
@@ -138,7 +138,42 @@
       },
       {
         "psql": "7.2.1.3",
-        "description": "sub-query to semi-join syntax with star results, using single value predicate clause",
+        "description": "sub-query to semi-join syntax with star results, using IN clause multiple times",
+        "sql": "SELECT * FROM {tbl1} WHERE num IN (SELECT num FROM {tbl2}) AND name IN (SELECT val FROM {tbl2} WHERE num = 3)"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "sub-query to semi-join syntax with star results, using IN clause multiple times with grouping",
+        "sql": "SELECT num, COUNT(*) FROM {tbl1} WHERE num IN (SELECT num FROM {tbl2}) AND name IN (SELECT val FROM {tbl2} WHERE num = 3) GROUP BY num"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "sub-query to multiple anti semi-join queries with star results, using NOT IN clause",
+        "sql": "SELECT * FROM {tbl1} WHERE (num > -10 and num < 10) AND (name NOT IN (SELECT val FROM {tbl2} WHERE num = 3)) AND (name NOT IN (SELECT val from {tbl2} WHERE num = 4))"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "sub-query with range predicates",
+        "sql": "SELECT * FROM {tbl1} WHERE (num > -10 and num < 10) AND (name NOT IN (SELECT val FROM {tbl2} WHERE num > -100 and num < 5))"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "join with range predicates on both sides of the join",
+        "sql": "SELECT * FROM {tbl1} AS A, {tbl2} AS B WHERE (A.num > 10 AND B.num < 20)"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "join with range predicate disjunction",
+        "sql": "SELECT * FROM {tbl1} AS A, {tbl2} AS B WHERE A.num > 10 OR B.num < 20"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "join query with mix of range predicate disjunction/conjunction",
+        "sql": "SELECT * FROM {tbl1} AS A, {tbl2} AS B WHERE (A.num > 10 AND B.num < 20) OR (A.num < 10 AND B.num < 10)"
+      },
+      {
+        "psql": "7.2.1.3",
+        "description": "sub-query to semi-join syntax with star results, using single val predicate clause",
         "sql": "SELECT * FROM {tbl1} WHERE num < (SELECT SUM(num) FROM {tbl2})"
       },
       {
@@ -171,7 +206,7 @@
       "tbl2" : {
         "schema": [
           {"name": "num", "type": "INT"},
-          {"name": "value", "type": "STRING"}
+          {"name": "val", "type": "STRING"}
         ],
         "inputs": [
           [1, "xxx"],
@@ -205,7 +240,7 @@
       {
         "psql": "7.2.1.1",
         "description": "FULL OUTER JOIN",
-        "sql": "SELECT {tbl1}.num, {tbl1}.name, {tbl2}.num, {tbl2}.value FROM {tbl1} FULL JOIN {tbl2} ON {tbl1}.num = {tbl2}.num",
+        "sql": "SELECT {tbl1}.num, {tbl1}.name, {tbl2}.num, {tbl2}.val FROM {tbl1} FULL JOIN {tbl2} ON {tbl1}.num = {tbl2}.num",
         "outputs": [
           [1, "a", 1, "xxx"],
           [1, "a", 1, "xxx"],
@@ -226,7 +261,7 @@
       {
         "psql": "7.2.1.1",
         "description": "FULL OUTER JOIN with left table empty",
-        "sql": "SELECT {tbl_empty}.strCol1, {tbl_empty}.intCol1, {tbl_empty}.strCol2, {tbl2}.num, {tbl2}.value FROM {tbl_empty} FULL JOIN {tbl2} ON {tbl_empty}.intCol1 = {tbl2}.num",
+        "sql": "SELECT {tbl_empty}.strCol1, {tbl_empty}.intCol1, {tbl_empty}.strCol2, {tbl2}.num, {tbl2}.val FROM {tbl_empty} FULL JOIN {tbl2} ON {tbl_empty}.intCol1 = {tbl2}.num",
         "outputs": [
           [null, null, null, 1, "xxx"],
           [null, null, null, 1, "xxx"],
@@ -241,7 +276,7 @@
       {
         "psql": "7.2.1.1",
         "description": "FULL OUTER JOIN with right table empty",
-        "sql": "SELECT {tbl_empty}.strCol1, {tbl_empty}.intCol1, {tbl_empty}.strCol2, {tbl2}.num, {tbl2}.value FROM {tbl2} FULL JOIN {tbl_empty} ON {tbl_empty}.intCol1 = {tbl2}.num",
+        "sql": "SELECT {tbl_empty}.strCol1, {tbl_empty}.intCol1, {tbl_empty}.strCol2, {tbl2}.num, {tbl2}.val FROM {tbl2} FULL JOIN {tbl_empty} ON {tbl_empty}.intCol1 = {tbl2}.num",
         "outputs": [
           [null, null, null, 1, "xxx"],
           [null, null, null, 1, "xxx"],
@@ -256,7 +291,7 @@
       {
         "psql": "7.2.1.1",
         "description": "FULL OUTER JOIN with inequality condition",
-        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.value FROM {tbl1} FULL OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num AND {tbl1}.name != {tbl2}.value",
+        "sql": "SELECT {tbl1}.num, {tbl2}.num, {tbl1}.name, {tbl2}.val FROM {tbl1} FULL OUTER JOIN {tbl2} ON {tbl1}.num = {tbl2}.num AND {tbl1}.name != {tbl2}.val",
         "outputs": [
           [1,  1, "a", "xxx"],
           [1,  1, "a", "xxx"],
@@ -356,6 +391,26 @@
       {
         "description": "join with mixed equality and inequality conditions",
         "sql": "SELECT * FROM {tbl1} JOIN {tbl2} ON {tbl1}.strCol1 = {tbl2}.strCol1 AND {tbl1}.intCol1 > {tbl2}.doubleCol1"
+      },
+      {
+        "description": "join with push-down filter pass lower aggregate",
+        "sql": "SELECT * FROM (SELECT {tbl1}.strCol1, SUM({tbl1}.intCol1) FROM {tbl1} JOIN {tbl2} ON {tbl1}.strCol1 = {tbl2}.strCol1 WHERE {tbl2}.intCol1 > {tbl2}.doubleCol1 GROUP BY 1) WHERE strCol1 NOT IN ('bar', 'alice')"
+      },
+      {
+        "description": "semi-join with push-down filter pass lower aggregate",
+        "sql": "SELECT * FROM (SELECT {tbl1}.strCol1, SUM({tbl1}.intCol1) FROM {tbl1} WHERE {tbl1}.strCol1 IN (SELECT {tbl2}.strCol1 FROM {tbl2} WHERE {tbl2}.intCol1 > {tbl2}.doubleCol1) GROUP BY 1) WHERE strCol1 NOT IN ('bar', 'alice')"
+      },
+      {
+        "description": "join with push-down filter pass lower aggregate with having filter",
+        "sql": "SELECT * FROM (SELECT {tbl1}.strCol1, SUM({tbl1}.intCol1) FROM {tbl1} JOIN {tbl2} ON {tbl1}.strCol1 = {tbl2}.strCol1 WHERE {tbl2}.intCol1 > {tbl2}.doubleCol1 GROUP BY 1 HAVING COUNT(*) > 1) WHERE strCol1 NOT IN ('bar', 'alice')"
+      },
+      {
+        "description": "semi-join with push-down filter pass lower aggregate with having filter",
+        "sql": "SELECT * FROM (SELECT {tbl1}.strCol1, SUM({tbl1}.intCol1) FROM {tbl1} WHERE {tbl1}.strCol1 IN (SELECT {tbl2}.strCol1 FROM {tbl2} WHERE {tbl2}.intCol1 > {tbl2}.doubleCol1) GROUP BY 1 HAVING COUNT(*) > 1) WHERE strCol1 NOT IN ('bar', 'alice')"
+      },
+      {
+        "description": "nested query with push-down filter pass inner aggregate",
+        "sql": "SELECT * FROM (SELECT {tbl1}.strCol1, SUM({tbl1}.intCol1) FROM {tbl1} GROUP BY {tbl1}.strCol1 HAVING COUNT(*) > 1) WHERE strCol1 NOT IN ('bar', 'alice')"
       }
     ]
   },

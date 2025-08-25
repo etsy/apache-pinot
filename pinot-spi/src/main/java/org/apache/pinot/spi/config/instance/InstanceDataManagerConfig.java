@@ -18,11 +18,13 @@
  */
 package org.apache.pinot.spi.config.instance;
 
+import java.util.Map;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.ReadMode;
 
 
 public interface InstanceDataManagerConfig {
+
   PinotConfiguration getConfig();
 
   String getInstanceId();
@@ -37,15 +39,13 @@ public interface InstanceDataManagerConfig {
 
   String getSegmentStoreUri();
 
+  String getConsumerClientIdSuffix();
+
   ReadMode getReadMode();
 
   String getSegmentFormatVersion();
 
   String getAvgMultiValueCount();
-
-  boolean isEnableSplitCommit();
-
-  boolean isEnableSplitCommitEndWithMetadata();
 
   boolean isRealtimeOffHeapAllocation();
 
@@ -68,4 +68,14 @@ public interface InstanceDataManagerConfig {
   int getDeletedSegmentsCacheTtlMinutes();
 
   String getSegmentPeerDownloadScheme();
+
+  long getExternalViewDroppedMaxWaitMs();
+
+  long getExternalViewDroppedCheckIntervalMs();
+
+  PinotConfiguration getUpsertConfig();
+
+  PinotConfiguration getAuthConfig();
+
+  Map<String, Map<String, String>> getTierConfigs();
 }

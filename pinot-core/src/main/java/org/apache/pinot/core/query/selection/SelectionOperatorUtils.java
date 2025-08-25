@@ -18,6 +18,8 @@
  */
 package org.apache.pinot.core.query.selection;
 
+import com.google.common.base.Preconditions;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -25,13 +27,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.OrderByExpressionContext;
@@ -40,11 +40,11 @@ import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.datatable.DataTableBuilder;
 import org.apache.pinot.core.common.datatable.DataTableBuilderFactory;
+import org.apache.pinot.core.operator.blocks.results.SelectionResultsBlock;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.IndexSegment;
-import org.apache.pinot.spi.utils.ArrayCopyUtils;
+import org.apache.pinot.spi.trace.Tracing;
 import org.apache.pinot.spi.utils.ByteArray;
-import org.apache.pinot.spi.utils.LoopUtils;
 import org.roaringbitmap.RoaringBitmap;
 
 
@@ -167,79 +167,195 @@ public class SelectionOperatorUtils {
   }
 
   /**
-   * Constructs the final selection DataSchema based on the order of selection columns (data schema can have a
-   * different order, depending on order by clause)
-   * @param dataSchema data schema used for execution and ordering
-   * @param selectionColumns the selection order
-   * @return data schema for final results
+   * Returns the data schema and column indices of the final selection results based on the query and the data schema of
+   * the server response. See {@link #extractExpressions} for the column orders on the server side.
+   * NOTE: DO NOT rely on column name lookup across query context and data schema because the string representation of
+   *       expression can change, which will cause backward incompatibility.
    */
-  public static DataSchema getResultTableDataSchema(DataSchema dataSchema, List<String> selectionColumns) {
-    Map<String, ColumnDataType> columnNameToDataType = new HashMap<>();
-    String[] columnNames = dataSchema.getColumnNames();
-    ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-    int numColumns = columnNames.length;
-    for (int i = 0; i < numColumns; i++) {
-      columnNameToDataType.put(columnNames[i], columnDataTypes[i]);
+  public static Pair<DataSchema, int[]> getResultTableDataSchemaAndColumnIndices(QueryContext queryContext,
+      DataSchema dataSchema) {
+    List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
+    int numSelectExpressions = selectExpressions.size();
+    ColumnDataType[] columnDataTypesInDataSchema = dataSchema.getColumnDataTypes();
+    int numColumnsInDataSchema = columnDataTypesInDataSchema.length;
+
+    // No order-by expression
+    // NOTE: Order-by expressions are ignored for queries with LIMIT 0.
+    List<OrderByExpressionContext> orderByExpressions = queryContext.getOrderByExpressions();
+    if (orderByExpressions == null || queryContext.getLimit() == 0) {
+      // For 'SELECT *', use the server response data schema as the final results data schema.
+      if ((numSelectExpressions == 1 && selectExpressions.get(0).equals(IDENTIFIER_STAR))) {
+        int[] columnIndices = new int[numColumnsInDataSchema];
+        for (int i = 0; i < numColumnsInDataSchema; i++) {
+          columnIndices[i] = i;
+        }
+        return Pair.of(dataSchema, columnIndices);
+      }
+
+      // For select without duplicate columns, the order of the final selection columns is the same as the order of the
+      // columns in the data schema.
+      if (numSelectExpressions == numColumnsInDataSchema) {
+        String[] columnNames = new String[numSelectExpressions];
+        int[] columnIndices = new int[numSelectExpressions];
+        for (int i = 0; i < numSelectExpressions; i++) {
+          columnNames[i] = selectExpressions.get(i).toString();
+          columnIndices[i] = i;
+        }
+        return Pair.of(new DataSchema(columnNames, columnDataTypesInDataSchema), columnIndices);
+      }
+
+      // For select with duplicate columns, construct a map from expression to index with the same order as the data
+      // schema, then look up the selection expressions.
+      Object2IntOpenHashMap<ExpressionContext> expressionIndexMap = new Object2IntOpenHashMap<>(numColumnsInDataSchema);
+      for (ExpressionContext selectExpression : selectExpressions) {
+        expressionIndexMap.putIfAbsent(selectExpression, expressionIndexMap.size());
+      }
+      Preconditions.checkState(expressionIndexMap.size() == numColumnsInDataSchema,
+          "BUG: Expect same number of deduped columns in SELECT clause and in data schema, got %s before dedup and %s"
+              + " after dedup in SELECT clause, %s in data schema", numSelectExpressions, expressionIndexMap.size(),
+          numColumnsInDataSchema);
+      String[] columnNames = new String[numSelectExpressions];
+      ColumnDataType[] columnDataTypes = new ColumnDataType[numSelectExpressions];
+      int[] columnIndices = new int[numSelectExpressions];
+      for (int i = 0; i < numSelectExpressions; i++) {
+        ExpressionContext selectExpression = selectExpressions.get(i);
+        int columnIndex = expressionIndexMap.getInt(selectExpression);
+        columnNames[i] = selectExpression.toString();
+        columnDataTypes[i] = columnDataTypesInDataSchema[columnIndex];
+        columnIndices[i] = columnIndex;
+      }
+      return Pair.of(new DataSchema(columnNames, columnDataTypes), columnIndices);
     }
-    int numResultColumns = selectionColumns.size();
-    ColumnDataType[] finalColumnDataTypes = new ColumnDataType[numResultColumns];
-    for (int i = 0; i < numResultColumns; i++) {
-      finalColumnDataTypes[i] = columnNameToDataType.get(selectionColumns.get(i));
+
+    // For 'SELECT *' with order-by, exclude transform functions from the returned columns and sort.
+    if (numSelectExpressions == 1 && selectExpressions.get(0).equals(IDENTIFIER_STAR)) {
+      String[] columnNamesInDataSchema = dataSchema.getColumnNames();
+      List<Integer> columnIndexList = new ArrayList<>(columnNamesInDataSchema.length);
+      for (int i = 0; i < columnNamesInDataSchema.length; i++) {
+        if (columnNamesInDataSchema[i].indexOf('(') == -1) {
+          columnIndexList.add(i);
+        }
+      }
+      columnIndexList.sort(Comparator.comparing(o -> columnNamesInDataSchema[o]));
+      int numColumns = columnIndexList.size();
+      String[] columnNames = new String[numColumns];
+      ColumnDataType[] columnDataTypes = new ColumnDataType[numColumns];
+      int[] columnIndices = new int[numColumns];
+      for (int i = 0; i < numColumns; i++) {
+        int columnIndex = columnIndexList.get(i);
+        columnNames[i] = columnNamesInDataSchema[columnIndex];
+        columnDataTypes[i] = columnDataTypesInDataSchema[columnIndex];
+        columnIndices[i] = columnIndex;
+      }
+      return Pair.of(new DataSchema(columnNames, columnDataTypes), columnIndices);
     }
-    return new DataSchema(selectionColumns.toArray(new String[0]), finalColumnDataTypes);
+
+    // For other order-by queries, construct a map from expression to index with the same order as the data schema,
+    // then look up the selection expressions.
+    Object2IntOpenHashMap<ExpressionContext> expressionIndexMap = new Object2IntOpenHashMap<>(numColumnsInDataSchema);
+    // NOTE: Order-by expressions are already deduped in QueryContext.
+    for (OrderByExpressionContext orderByExpression : orderByExpressions) {
+      expressionIndexMap.put(orderByExpression.getExpression(), expressionIndexMap.size());
+    }
+    for (ExpressionContext selectExpression : selectExpressions) {
+      expressionIndexMap.putIfAbsent(selectExpression, expressionIndexMap.size());
+    }
+    String[] columnNames = new String[numSelectExpressions];
+    ColumnDataType[] columnDataTypes = new ColumnDataType[numSelectExpressions];
+    int[] columnIndices = new int[numSelectExpressions];
+    if (expressionIndexMap.size() == numColumnsInDataSchema) {
+      for (int i = 0; i < numSelectExpressions; i++) {
+        ExpressionContext selectExpression = selectExpressions.get(i);
+        int columnIndex = expressionIndexMap.getInt(selectExpression);
+        columnNames[i] = selectExpression.toString();
+        columnDataTypes[i] = columnDataTypesInDataSchema[columnIndex];
+        columnIndices[i] = columnIndex;
+      }
+    } else {
+      // When all segments are pruned on the server side, the data schema will only contain the columns in the SELECT
+      // clause, and data type for all columns are set to STRING. See ResultBlocksUtils for details.
+      for (int i = 0; i < numSelectExpressions; i++) {
+        columnNames[i] = selectExpressions.get(i).toString();
+        columnDataTypes[i] = ColumnDataType.STRING;
+        columnIndices[i] = i;
+      }
+    }
+    return Pair.of(new DataSchema(columnNames, columnDataTypes), columnIndices);
   }
 
   /**
    * Merge two partial results for selection queries without <code>ORDER BY</code>. (Server side)
    *
-   * @param mergedRows partial results 1.
-   * @param rowsToMerge partial results 2.
+   * @param mergedBlock partial results 1.
+   * @param blockToMerge partial results 2.
    * @param selectionSize size of the selection.
    */
-  public static void mergeWithoutOrdering(Collection<Object[]> mergedRows, Collection<Object[]> rowsToMerge,
+  public static void mergeWithoutOrdering(SelectionResultsBlock mergedBlock, SelectionResultsBlock blockToMerge,
       int selectionSize) {
-    Iterator<Object[]> iterator = rowsToMerge.iterator();
-    int numMergedRows = 0;
-    while (mergedRows.size() < selectionSize && iterator.hasNext()) {
-      LoopUtils.checkMergePhaseInterruption(numMergedRows);
-      mergedRows.add(iterator.next());
-      numMergedRows++;
+    List<Object[]> mergedRows = mergedBlock.getRows();
+    List<Object[]> rowsToMerge = blockToMerge.getRows();
+    int numRowsToMerge = Math.min(selectionSize - mergedRows.size(), rowsToMerge.size());
+    if (numRowsToMerge > 0) {
+      mergedRows.addAll(rowsToMerge.subList(0, numRowsToMerge));
     }
   }
 
   /**
    * Merge two partial results for selection queries with <code>ORDER BY</code>. (Server side)
-   * TODO: Should use type compatible comparator to compare the rows
    *
-   * @param mergedRows partial results 1.
-   * @param rowsToMerge partial results 2.
+   * @param mergedBlock partial results 1 (sorted).
+   * @param blockToMerge partial results 2 (sorted).
    * @param maxNumRows maximum number of rows need to be stored.
    */
-  public static void mergeWithOrdering(PriorityQueue<Object[]> mergedRows, Collection<Object[]> rowsToMerge,
+  public static void mergeWithOrdering(SelectionResultsBlock mergedBlock, SelectionResultsBlock blockToMerge,
       int maxNumRows) {
-    int numMergedRows = 0;
-    for (Object[] row : rowsToMerge) {
-      LoopUtils.checkMergePhaseInterruption(numMergedRows);
-      addToPriorityQueue(row, mergedRows, maxNumRows);
-      numMergedRows++;
+    List<Object[]> sortedRows1 = mergedBlock.getRows();
+    List<Object[]> sortedRows2 = blockToMerge.getRows();
+    Comparator<? super Object[]> comparator = mergedBlock.getComparator();
+    assert comparator != null;
+    int numSortedRows1 = sortedRows1.size();
+    int numSortedRows2 = sortedRows2.size();
+    if (numSortedRows1 == 0) {
+      mergedBlock.setRows(sortedRows2);
+      return;
     }
+    if (numSortedRows2 == 0 || (numSortedRows1 == maxNumRows
+        && comparator.compare(sortedRows1.get(numSortedRows1 - 1), sortedRows2.get(0)) <= 0)) {
+      return;
+    }
+    int numRowsToMerge = Math.min(numSortedRows1 + numSortedRows2, maxNumRows);
+    List<Object[]> mergedRows = new ArrayList<>(numRowsToMerge);
+    int i1 = 0;
+    int i2 = 0;
+    int numMergedRows = 0;
+    while (i1 < numSortedRows1 && i2 < numSortedRows2 && numMergedRows < numRowsToMerge) {
+      Object[] row1 = sortedRows1.get(i1);
+      Object[] row2 = sortedRows2.get(i2);
+      if (comparator.compare(row1, row2) <= 0) {
+        mergedRows.add(row1);
+        i1++;
+      } else {
+        mergedRows.add(row2);
+        i2++;
+      }
+      Tracing.ThreadAccountantOps.sampleAndCheckInterruptionPeriodically(numMergedRows++);
+    }
+    if (numMergedRows < numRowsToMerge) {
+      if (i1 < numSortedRows1) {
+        assert i2 == numSortedRows2;
+        mergedRows.addAll(sortedRows1.subList(i1, i1 + numRowsToMerge - numMergedRows));
+      } else {
+        assert i1 == numSortedRows1;
+        mergedRows.addAll(sortedRows2.subList(i2, i2 + numRowsToMerge - numMergedRows));
+      }
+    }
+    mergedBlock.setRows(mergedRows);
   }
 
   /**
    * Build a {@link DataTable} from a {@link Collection} of selection rows with {@link DataSchema}. (Server side)
-   * <p>The passed in data schema stored the column data type that can cover all actual data types for that column.
-   * <p>The actual data types for each column in rows can be different but must be compatible with each other.
-   * <p>Before write each row into the data table, first convert it to match the data types in data schema.
    *
-   * TODO: Type compatibility is not supported for selection order-by because all segments on the same server shared the
-   *       same comparator. Another solution is to always use the table schema to execute the query (preferable because
-   *       type compatible checks are expensive).
-   *
-   * @param rows {@link Collection} of selection rows.
-   * @param dataSchema data schema.
-   * @param nullHandlingEnabled whether null handling is enabled.
-   * @return data table.
-   * @throws IOException
+   * This method is allowed to modify the given rows. Specifically, it may remove nulls cells from it.
    */
   public static DataTable getDataTableFromRows(Collection<Object[]> rows, DataSchema dataSchema,
       boolean nullHandlingEnabled)
@@ -269,32 +385,37 @@ public class SelectionOperatorUtils {
       }
     }
 
+    int numRowsAdded = 0;
     for (Object[] row : rows) {
+      Tracing.ThreadAccountantOps.sampleAndCheckInterruptionPeriodically(numRowsAdded);
       dataTableBuilder.startRow();
       for (int i = 0; i < numColumns; i++) {
         Object columnValue = row[i];
         switch (storedColumnDataTypes[i]) {
           // Single-value column
           case INT:
-            dataTableBuilder.setColumn(i, ((Number) columnValue).intValue());
+            dataTableBuilder.setColumn(i, (int) columnValue);
             break;
           case LONG:
-            dataTableBuilder.setColumn(i, ((Number) columnValue).longValue());
+            dataTableBuilder.setColumn(i, (long) columnValue);
             break;
           case FLOAT:
-            dataTableBuilder.setColumn(i, ((Number) columnValue).floatValue());
+            dataTableBuilder.setColumn(i, (float) columnValue);
             break;
           case DOUBLE:
-            dataTableBuilder.setColumn(i, ((Number) columnValue).doubleValue());
+            dataTableBuilder.setColumn(i, (double) columnValue);
             break;
           case BIG_DECIMAL:
             dataTableBuilder.setColumn(i, (BigDecimal) columnValue);
             break;
           case STRING:
-            dataTableBuilder.setColumn(i, ((String) columnValue));
+            dataTableBuilder.setColumn(i, (String) columnValue);
             break;
           case BYTES:
             dataTableBuilder.setColumn(i, (ByteArray) columnValue);
+            break;
+          case UNKNOWN:
+            dataTableBuilder.setColumn(i, (Object) null);
             break;
 
           // Multi-value column
@@ -302,43 +423,13 @@ public class SelectionOperatorUtils {
             dataTableBuilder.setColumn(i, (int[]) columnValue);
             break;
           case LONG_ARRAY:
-            // LONG_ARRAY type covers INT_ARRAY and LONG_ARRAY
-            if (columnValue instanceof int[]) {
-              int[] ints = (int[]) columnValue;
-              int length = ints.length;
-              long[] longs = new long[length];
-              ArrayCopyUtils.copy(ints, longs, length);
-              dataTableBuilder.setColumn(i, longs);
-            } else {
-              dataTableBuilder.setColumn(i, (long[]) columnValue);
-            }
+            dataTableBuilder.setColumn(i, (long[]) columnValue);
             break;
           case FLOAT_ARRAY:
             dataTableBuilder.setColumn(i, (float[]) columnValue);
             break;
           case DOUBLE_ARRAY:
-            // DOUBLE_ARRAY type covers INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY and DOUBLE_ARRAY
-            if (columnValue instanceof int[]) {
-              int[] ints = (int[]) columnValue;
-              int length = ints.length;
-              double[] doubles = new double[length];
-              ArrayCopyUtils.copy(ints, doubles, length);
-              dataTableBuilder.setColumn(i, doubles);
-            } else if (columnValue instanceof long[]) {
-              long[] longs = (long[]) columnValue;
-              int length = longs.length;
-              double[] doubles = new double[length];
-              ArrayCopyUtils.copy(longs, doubles, length);
-              dataTableBuilder.setColumn(i, doubles);
-            } else if (columnValue instanceof float[]) {
-              float[] floats = (float[]) columnValue;
-              int length = floats.length;
-              double[] doubles = new double[length];
-              ArrayCopyUtils.copy(floats, doubles, length);
-              dataTableBuilder.setColumn(i, doubles);
-            } else {
-              dataTableBuilder.setColumn(i, (double[]) columnValue);
-            }
+            dataTableBuilder.setColumn(i, (double[]) columnValue);
             break;
           case STRING_ARRAY:
             dataTableBuilder.setColumn(i, (String[]) columnValue);
@@ -351,6 +442,7 @@ public class SelectionOperatorUtils {
         }
       }
       dataTableBuilder.finishRow();
+      numRowsAdded++;
     }
 
     if (nullHandlingEnabled) {
@@ -397,6 +489,9 @@ public class SelectionOperatorUtils {
           break;
         case BYTES:
           row[i] = dataTable.getBytes(rowId, i);
+          break;
+        case UNKNOWN:
+          row[i] = null;
           break;
 
         // Multi-value column
@@ -460,21 +555,21 @@ public class SelectionOperatorUtils {
           nullBitmaps[coldId] = dataTable.getNullRowIds(coldId);
         }
         for (int rowId = 0; rowId < numRows; rowId++) {
-          LoopUtils.checkMergePhaseInterruption(rowId);
           if (rows.size() < limit) {
             rows.add(extractRowFromDataTableWithNullHandling(dataTable, rowId, nullBitmaps));
           } else {
             break;
           }
+          Tracing.ThreadAccountantOps.sampleAndCheckInterruptionPeriodically(rowId);
         }
       } else {
         for (int rowId = 0; rowId < numRows; rowId++) {
-          LoopUtils.checkMergePhaseInterruption(rowId);
           if (rows.size() < limit) {
             rows.add(extractRowFromDataTable(dataTable, rowId));
           } else {
             break;
           }
+          Tracing.ThreadAccountantOps.sampleAndCheckInterruptionPeriodically(rowId);
         }
       }
     }
@@ -482,162 +577,26 @@ public class SelectionOperatorUtils {
   }
 
   /**
-   * Render the selection rows to a {@link ResultTable} object
-   * for selection queries without <code>ORDER BY</code>
-   * <p>{@link ResultTable} object will be used to set in the broker response.
-   * <p>Should be called after method "reduceWithoutOrdering()".
-   *
-   * @param rows selection rows.
-   * @param dataSchema data schema.
-   * @param selectionColumns selection columns.
-   * @return {@link ResultTable} object results.
+   * Renders the selection rows to a {@link ResultTable} object for selection queries without <code>ORDER BY</code>.
+   * (Broker side)
    */
   public static ResultTable renderResultTableWithoutOrdering(List<Object[]> rows, DataSchema dataSchema,
-      List<String> selectionColumns) {
+      int[] columnIndices) {
     int numRows = rows.size();
     List<Object[]> resultRows = new ArrayList<>(numRows);
-
-    DataSchema resultDataSchema = dataSchema;
-    Map<String, Integer> columnNameToIndexMap = null;
-    if (dataSchema.getColumnNames().length != selectionColumns.size()) {
-      // Create updated data schema since one column can be selected multiple times.
-      columnNameToIndexMap = new HashMap<>(dataSchema.getColumnNames().length);
-      String[] columnNames = dataSchema.getColumnNames();
-      ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-      for (int i = 0; i < columnNames.length; i++) {
-        columnNameToIndexMap.put(columnNames[i], i);
-      }
-
-      ColumnDataType[] newColumnDataTypes = new ColumnDataType[selectionColumns.size()];
-      for (int i = 0; i < newColumnDataTypes.length; i++) {
-        int index = columnNameToIndexMap.get(selectionColumns.get(i));
-        newColumnDataTypes[i] = columnDataTypes[index];
-      }
-
-      resultDataSchema = new DataSchema(selectionColumns.toArray(new String[0]), newColumnDataTypes);
-    }
-
-    int numColumns = resultDataSchema.getColumnNames().length;
-    ColumnDataType[] resultColumnDataTypes = resultDataSchema.getColumnDataTypes();
+    ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
+    int numColumns = columnDataTypes.length;
     for (Object[] row : rows) {
       Object[] resultRow = new Object[numColumns];
       for (int i = 0; i < numColumns; i++) {
-        int index = (columnNameToIndexMap != null) ? columnNameToIndexMap.get(selectionColumns.get(i)) : i;
-        Object value = row[index];
+        Object value = row[columnIndices[i]];
         if (value != null) {
-          resultRow[i] = resultColumnDataTypes[i].convertAndFormat(value);
+          resultRow[i] = columnDataTypes[i].convertAndFormat(value);
         }
       }
       resultRows.add(resultRow);
     }
-
-    return new ResultTable(resultDataSchema, resultRows);
-  }
-
-  /**
-   * Helper method to compute column indices from selection columns and the data schema for selection queries
-   * @param selectionColumns selection columns.
-   * @param dataSchema data schema.
-   * @return column indices
-   */
-  public static int[] getColumnIndices(List<String> selectionColumns, DataSchema dataSchema) {
-    String[] columnNames = dataSchema.getColumnNames();
-    Map<String, Integer> columnToIndexMap = getColumnToIndexMap(columnNames);
-    int numSelectionColumns = selectionColumns.size();
-    int[] columnIndices = new int[numSelectionColumns];
-    for (int i = 0; i < numSelectionColumns; i++) {
-      columnIndices[i] = columnToIndexMap.get(selectionColumns.get(i));
-    }
-    return columnIndices;
-  }
-
-  public static Map<String, Integer> getColumnToIndexMap(String[] columns) {
-    Map<String, Integer> columnToIndexMap = new HashMap<>();
-    int numColumns = columns.length;
-    for (int i = 0; i < numColumns; i++) {
-      columnToIndexMap.put(columns[i], i);
-    }
-    return columnToIndexMap;
-  }
-
-  /**
-   * Helper method to get the type-compatible {@link Comparator} for selection rows. (Inter segment)
-   * <p>Type-compatible comparator allows compatible types to compare with each other.
-   *
-   * @return flexible {@link Comparator} for selection rows.
-   */
-  public static Comparator<Object[]> getTypeCompatibleComparator(List<OrderByExpressionContext> orderByExpressions,
-      DataSchema dataSchema, boolean isNullHandlingEnabled) {
-    ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-
-    // Compare all single-value columns
-    int numOrderByExpressions = orderByExpressions.size();
-    List<Integer> valueIndexList = new ArrayList<>(numOrderByExpressions);
-    for (int i = 0; i < numOrderByExpressions; i++) {
-      if (!columnDataTypes[i].isArray()) {
-        valueIndexList.add(i);
-      }
-    }
-
-    int numValuesToCompare = valueIndexList.size();
-    int[] valueIndices = new int[numValuesToCompare];
-    boolean[] useDoubleComparison = new boolean[numValuesToCompare];
-    // Use multiplier -1 or 1 to control ascending/descending order
-    int[] multipliers = new int[numValuesToCompare];
-    for (int i = 0; i < numValuesToCompare; i++) {
-      int valueIndex = valueIndexList.get(i);
-      valueIndices[i] = valueIndex;
-      if (columnDataTypes[valueIndex].isNumber()) {
-        useDoubleComparison[i] = true;
-      }
-      multipliers[i] = orderByExpressions.get(valueIndex).isAsc() ? -1 : 1;
-    }
-
-    if (isNullHandlingEnabled) {
-      return (o1, o2) -> {
-        for (int i = 0; i < numValuesToCompare; i++) {
-          int index = valueIndices[i];
-          Object v1 = o1[index];
-          Object v2 = o2[index];
-          if (v1 == null) {
-            // The default null ordering is: 'NULLS LAST'.
-            return v2 == null ? 0 : -multipliers[i];
-          } else if (v2 == null) {
-            return multipliers[i];
-          }
-          int result;
-          if (useDoubleComparison[i]) {
-            result = Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
-          } else {
-            //noinspection unchecked
-            result = ((Comparable) v1).compareTo(v2);
-          }
-          if (result != 0) {
-            return result * multipliers[i];
-          }
-        }
-        return 0;
-      };
-    } else {
-      return (o1, o2) -> {
-        for (int i = 0; i < numValuesToCompare; i++) {
-          int index = valueIndices[i];
-          Object v1 = o1[index];
-          Object v2 = o2[index];
-          int result;
-          if (useDoubleComparison[i]) {
-            result = Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
-          } else {
-            //noinspection unchecked
-            result = ((Comparable) v1).compareTo(v2);
-          }
-          if (result != 0) {
-            return result * multipliers[i];
-          }
-        }
-        return 0;
-      };
-    }
+    return new ResultTable(dataSchema, resultRows);
   }
 
   /**
@@ -655,20 +614,5 @@ public class SelectionOperatorUtils {
       queue.poll();
       queue.offer(value);
     }
-  }
-
-  public static DataSchema getSchemaForProjection(DataSchema dataSchema, int[] columnIndices) {
-    int numColumns = columnIndices.length;
-
-    String[] columnNames = dataSchema.getColumnNames();
-    ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-    String[] resultColumnNames = new String[numColumns];
-    ColumnDataType[] resultColumnDataTypes = new ColumnDataType[numColumns];
-    for (int i = 0; i < numColumns; i++) {
-      int columnIndex = columnIndices[i];
-      resultColumnNames[i] = columnNames[columnIndex];
-      resultColumnDataTypes[i] = columnDataTypes[columnIndex];
-    }
-    return new DataSchema(resultColumnNames, resultColumnDataTypes);
   }
 }

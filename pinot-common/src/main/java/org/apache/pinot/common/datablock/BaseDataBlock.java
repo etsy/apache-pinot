@@ -18,7 +18,6 @@
  */
 package org.apache.pinot.common.datablock;
 
-import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -27,10 +26,13 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.commons.io.output.UnsynchronizedByteArrayOutputStream;
+import org.apache.pinot.common.CustomObject;
 import org.apache.pinot.common.datatable.DataTableImplV3;
 import org.apache.pinot.common.datatable.DataTableUtils;
 import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.HashUtil;
 import org.apache.pinot.common.utils.RoaringBitmapUtils;
 import org.apache.pinot.spi.accounting.ThreadResourceUsageProvider;
 import org.apache.pinot.spi.utils.BigDecimalUtils;
@@ -91,7 +93,6 @@ public abstract class BaseDataBlock implements DataBlock {
   protected ByteBuffer _fixedSizeData;
   protected byte[] _variableSizeDataBytes;
   protected ByteBuffer _variableSizeData;
-  protected Map<String, String> _metadata;
 
   /**
    * construct a base data block.
@@ -112,7 +113,6 @@ public abstract class BaseDataBlock implements DataBlock {
     _fixedSizeData = ByteBuffer.wrap(fixedSizeDataBytes);
     _variableSizeDataBytes = variableSizeDataBytes;
     _variableSizeData = ByteBuffer.wrap(variableSizeDataBytes);
-    _metadata = new HashMap<>();
     _errCodeToExceptionMap = new HashMap<>();
   }
 
@@ -129,7 +129,6 @@ public abstract class BaseDataBlock implements DataBlock {
     _fixedSizeData = null;
     _variableSizeDataBytes = null;
     _variableSizeData = null;
-    _metadata = new HashMap<>();
     _errCodeToExceptionMap = new HashMap<>();
   }
 
@@ -185,21 +184,15 @@ public abstract class BaseDataBlock implements DataBlock {
     }
 
     // Read variable size data.
+    _variableSizeDataBytes = new byte[variableSizeDataLength];
     if (variableSizeDataLength != 0) {
-      _variableSizeDataBytes = new byte[variableSizeDataLength];
       byteBuffer.position(variableSizeDataStart);
       byteBuffer.get(_variableSizeDataBytes);
-      _variableSizeData = ByteBuffer.wrap(_variableSizeDataBytes);
-    } else {
-      _variableSizeDataBytes = null;
-      _variableSizeData = null;
     }
+    _variableSizeData = ByteBuffer.wrap(_variableSizeDataBytes);
 
     // Read metadata.
-    int metadataLength = byteBuffer.getInt();
-    if (metadataLength != 0) {
-      _metadata = deserializeMetadata(byteBuffer);
-    }
+    deserializeMetadata(byteBuffer);
   }
 
   @Override
@@ -233,7 +226,7 @@ public abstract class BaseDataBlock implements DataBlock {
 
   @Override
   public Map<String, String> getMetadata() {
-    return _metadata;
+    return Collections.emptyMap();
   }
 
   @Override
@@ -347,6 +340,20 @@ public abstract class BaseDataBlock implements DataBlock {
 
   @Nullable
   @Override
+  public CustomObject getCustomObject(int rowId, int colId) {
+    int size = positionOffsetInVariableBufferAndGetLength(rowId, colId);
+    int type = _variableSizeData.getInt();
+    if (size == 0) {
+      assert type == CustomObject.NULL_TYPE_VALUE;
+      return null;
+    }
+    ByteBuffer buffer = _variableSizeData.slice();
+    buffer.limit(size);
+    return new CustomObject(type, buffer);
+  }
+
+  @Nullable
+  @Override
   public RoaringBitmap getNullRowIds(int colId) {
     // _fixedSizeData stores two ints per col's null bitmap: offset, and length.
     int position = _fixDataSize + colId * Integer.BYTES * 2;
@@ -375,7 +382,10 @@ public abstract class BaseDataBlock implements DataBlock {
    */
   protected byte[] serializeStringDictionary()
       throws IOException {
-    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+    if (_stringDictionary.length == 0) {
+      return new byte[4];
+    }
+    UnsynchronizedByteArrayOutputStream byteArrayOutputStream = new UnsynchronizedByteArrayOutputStream(1024);
     DataOutputStream dataOutputStream = new DataOutputStream(byteArrayOutputStream);
 
     dataOutputStream.writeInt(_stringDictionary.length);
@@ -416,21 +426,24 @@ public abstract class BaseDataBlock implements DataBlock {
     return _errCodeToExceptionMap;
   }
 
+  /**
+   * Serialize this data block to a byte array.
+   * <p>
+   * In order to deserialize it, {@link DataBlockUtils#getDataBlock(ByteBuffer)} should be used.
+   */
   @Override
   public byte[] toBytes()
       throws IOException {
     ThreadResourceUsageProvider threadResourceUsageProvider = new ThreadResourceUsageProvider();
 
-    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+    UnsynchronizedByteArrayOutputStream byteArrayOutputStream = new UnsynchronizedByteArrayOutputStream(8192);
     DataOutputStream dataOutputStream = new DataOutputStream(byteArrayOutputStream);
     writeLeadingSections(dataOutputStream);
 
     // Write metadata: length followed by actual metadata bytes.
     // NOTE: We ignore metadata serialization time in "responseSerializationCpuTimeNs" as it's negligible while
     // considering it will bring a lot code complexity.
-    byte[] metadataBytes = serializeMetadata();
-    dataOutputStream.writeInt(metadataBytes.length);
-    dataOutputStream.write(metadataBytes);
+    serializeMetadata(dataOutputStream);
 
     return byteArrayOutputStream.toByteArray();
   }
@@ -509,19 +522,38 @@ public abstract class BaseDataBlock implements DataBlock {
     }
   }
 
-  private byte[] serializeMetadata()
+  /**
+   * Writes the metadata section to the given data output stream.
+   */
+  protected void serializeMetadata(DataOutputStream dataOutputStream)
       throws IOException {
-    return new byte[0];
+    dataOutputStream.writeInt(0);
   }
 
-  private Map<String, String> deserializeMetadata(ByteBuffer buffer)
+  /**
+   * Deserializes the metadata section from the given byte buffer.
+   * <p>
+   * This is the counterpart of {@link #serializeMetadata(DataOutputStream)} and it is guaranteed that the buffer will
+   * be positioned at the start of the metadata section when this method is called.
+   * <p>
+   * <strong>Important:</strong> It is mandatory for implementations to leave the cursor at the end of the metadata, in
+   * the exact same position as it was when {@link #serializeMetadata(DataOutputStream)} was called.
+   * <p>
+   * <strong>Important:</strong> This method will be called at the end of the BaseDataConstructor constructor to read
+   * the metadata section. This means that it will be called <strong>before</strong> the subclass have been constructor
+   * have been called. Therefore it is not possible to use any subclass fields in this method.
+   */
+  protected void deserializeMetadata(ByteBuffer buffer)
       throws IOException {
-    return Collections.emptyMap();
+    buffer.getInt();
   }
 
   private byte[] serializeExceptions()
       throws IOException {
-    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+    if (_errCodeToExceptionMap.isEmpty()) {
+      return new byte[4];
+    }
+    UnsynchronizedByteArrayOutputStream byteArrayOutputStream = new UnsynchronizedByteArrayOutputStream(1024);
     DataOutputStream dataOutputStream = new DataOutputStream(byteArrayOutputStream);
 
     dataOutputStream.writeInt(_errCodeToExceptionMap.size());
@@ -541,7 +573,7 @@ public abstract class BaseDataBlock implements DataBlock {
   private Map<Integer, String> deserializeExceptions(ByteBuffer buffer)
       throws IOException {
     int numExceptions = buffer.getInt();
-    Map<Integer, String> exceptions = new HashMap<>(numExceptions);
+    Map<Integer, String> exceptions = new HashMap<>(HashUtil.getHashMapCapacity(numExceptions));
     for (int i = 0; i < numExceptions; i++) {
       int errCode = buffer.getInt();
       String errMessage = DataTableUtils.decodeString(buffer);
@@ -553,42 +585,9 @@ public abstract class BaseDataBlock implements DataBlock {
   @Override
   public String toString() {
     if (_dataSchema == null) {
-      return _metadata.toString();
+      return "{}";
+    } else {
+      return "resultSchema:" + '\n' + _dataSchema + '\n' + "numRows: " + _numRows + '\n';
     }
-
-    StringBuilder stringBuilder = new StringBuilder();
-    stringBuilder.append(_dataSchema).append('\n');
-    stringBuilder.append("numRows: ").append(_numRows).append('\n');
-
-    DataSchema.ColumnDataType[] storedColumnDataTypes = _dataSchema.getStoredColumnDataTypes();
-    _fixedSizeData.position(0);
-    for (int rowId = 0; rowId < _numRows; rowId++) {
-      for (int colId = 0; colId < _numColumns; colId++) {
-        switch (storedColumnDataTypes[colId]) {
-          case INT:
-            stringBuilder.append(_fixedSizeData.getInt());
-            break;
-          case LONG:
-            stringBuilder.append(_fixedSizeData.getLong());
-            break;
-          case FLOAT:
-            stringBuilder.append(_fixedSizeData.getFloat());
-            break;
-          case DOUBLE:
-            stringBuilder.append(_fixedSizeData.getDouble());
-            break;
-          case STRING:
-            stringBuilder.append(_fixedSizeData.getInt());
-            break;
-          // Object and array.
-          default:
-            stringBuilder.append(String.format("(%s:%s)", _fixedSizeData.getInt(), _fixedSizeData.getInt()));
-            break;
-        }
-        stringBuilder.append("\t");
-      }
-      stringBuilder.append("\n");
-    }
-    return stringBuilder.toString();
   }
 }

@@ -22,6 +22,7 @@ import java.math.BigDecimal;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.RequestContextUtils;
 import org.apache.pinot.spi.exception.BadQueryRequestException;
+import org.roaringbitmap.RoaringBitmap;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -68,8 +69,8 @@ public class AdditionTransformFunctionTest extends BaseTransformFunctionTest {
     testTransformFunction(transformFunction, expectedBigDecimalValues);
 
     expression = RequestContextUtils.getExpression(
-        String.format("add(add(12,%s),%s,add(add(%s,%s),'12110.34556677889901122335678',%s),%s)", STRING_SV_COLUMN,
-            DOUBLE_SV_COLUMN, FLOAT_SV_COLUMN, LONG_SV_COLUMN, INT_SV_COLUMN, BIG_DECIMAL_SV_COLUMN));
+        String.format("add(add(12,%s),%s,add(add(%s,%s),cast('12110.34556677889901122335678' as decimal),%s),%s)",
+            STRING_SV_COLUMN, DOUBLE_SV_COLUMN, FLOAT_SV_COLUMN, LONG_SV_COLUMN, INT_SV_COLUMN, BIG_DECIMAL_SV_COLUMN));
     transformFunction = TransformFunctionFactory.get(expression, _dataSourceMap);
     Assert.assertTrue(transformFunction instanceof AdditionTransformFunction);
     BigDecimal val4 = new BigDecimal("12110.34556677889901122335678");
@@ -98,5 +99,40 @@ public class AdditionTransformFunctionTest extends BaseTransformFunctionTest {
         String.format("add(%s, %s)", LONG_SV_COLUMN, INT_MV_COLUMN)
     }
     };
+  }
+
+  @Test
+  public void testAdditionNullLiteral() {
+    ExpressionContext expression = RequestContextUtils.getExpression(String.format("add(%s,null)", INT_SV_COLUMN));
+    TransformFunction transformFunction = TransformFunctionFactory.get(expression, _dataSourceMap);
+    Assert.assertTrue(transformFunction instanceof AdditionTransformFunction);
+    Assert.assertEquals(transformFunction.getName(), AdditionTransformFunction.FUNCTION_NAME);
+    double[] expectedValues = new double[NUM_ROWS];
+    for (int i = 0; i < NUM_ROWS; i++) {
+      expectedValues[i] = _intSVValues[i];
+    }
+    RoaringBitmap roaringBitmap = new RoaringBitmap();
+    roaringBitmap.add(0L, NUM_ROWS);
+    testTransformFunctionWithNull(transformFunction, expectedValues, roaringBitmap);
+  }
+
+  @Test
+  public void testAdditionNullColumn() {
+    ExpressionContext expression =
+        RequestContextUtils.getExpression(String.format("add(%s,%s)", INT_SV_COLUMN, INT_SV_NULL_COLUMN));
+    TransformFunction transformFunction = TransformFunctionFactory.get(expression, _dataSourceMap);
+    Assert.assertTrue(transformFunction instanceof AdditionTransformFunction);
+    Assert.assertEquals(transformFunction.getName(), AdditionTransformFunction.FUNCTION_NAME);
+    double[] expectedValues = new double[NUM_ROWS];
+    RoaringBitmap roaringBitmap = new RoaringBitmap();
+    for (int i = 0; i < NUM_ROWS; i++) {
+      if (isNullRow(i)) {
+        expectedValues[i] = (double) Integer.MIN_VALUE + (double) _intSVValues[i];
+        roaringBitmap.add(i);
+      } else {
+        expectedValues[i] = (double) _intSVValues[i] * 2;
+      }
+    }
+    testTransformFunctionWithNull(transformFunction, expectedValues, roaringBitmap);
   }
 }

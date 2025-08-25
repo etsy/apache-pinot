@@ -40,7 +40,10 @@ import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
+import org.apache.pinot.segment.spi.index.ForwardIndexConfig;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.config.table.IndexConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -53,11 +56,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNotNull;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.*;
 
 
 /**
@@ -153,9 +152,10 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     segmentGeneratorConfig.setOutDir(INDEX_DIR.getAbsolutePath());
     segmentGeneratorConfig.setSegmentName(segmentName);
     _invertedIndexColumns = Arrays.asList("column3", "column6", "column8", "column9");
-    segmentGeneratorConfig.setInvertedIndexCreationColumns(_invertedIndexColumns);
+    segmentGeneratorConfig.setIndexOn(StandardIndexes.inverted(), IndexConfig.ENABLED, _invertedIndexColumns);
     _forwardIndexDisabledColumns = new ArrayList<>(Arrays.asList("column6"));
-    segmentGeneratorConfig.setForwardIndexDisabledColumns(_forwardIndexDisabledColumns);
+    segmentGeneratorConfig.setIndexOn(StandardIndexes.forward(), ForwardIndexConfig.DISABLED,
+        _forwardIndexDisabledColumns);
     segmentGeneratorConfig.setRawIndexCreationColumns(_noDictionaryColumns);
     // The segment generation code in SegmentColumnarIndexCreator will throw
     // exception if start and end time in time column are not in acceptable
@@ -224,8 +224,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // This is just a sanity check to ensure the query works when forward index is enabled
     String query = "SELECT column1, column5, column7 FROM testTable WHERE column7 != 201 ORDER BY column1";
     BrokerResponseNative brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     ResultTable resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -255,14 +255,14 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
 
     // Run the same query and validate that an exception is thrown since column7 has forward index disabled
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() != null
-        && brokerResponseNative.getProcessingExceptions().size() > 0);
+    assertTrue(brokerResponseNative.getExceptions() != null
+        && brokerResponseNative.getExceptions().size() > 0);
 
     // Run a query which uses column7 in the where clause and not in the select list. This should work
     query = "SELECT column1, column5 FROM testTable WHERE column7 IN (201, 2147483647) ORDER BY column1";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -288,8 +288,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // Transform function on a filter clause for forwardIndexDisabled column in transform
     query = "SELECT column1, column10 from testTable WHERE ARRAYLENGTH(column7) = 2";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() != null
-        && brokerResponseNative.getProcessingExceptions().size() > 0);
+    assertTrue(brokerResponseNative.getExceptions() != null
+        && brokerResponseNative.getExceptions().size() > 0);
 
     // Re-enable forward index for column7 and column6
     reenableForwardIndexForSomeColumns();
@@ -297,8 +297,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // Selection query without filters including column7
     query = "SELECT column1, column5, column7, column6 FROM testTable WHERE column7 != 201 ORDER BY column1";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -327,8 +327,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     query = "SELECT column1, column10 from testTable WHERE ARRAYLENGTH(column7) = 2 AND ARRAYLENGTH(column6) = 2 "
         + "ORDER BY column1";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -356,8 +356,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // Select query with order by on column9 with limit == totalDocs
     String query = "SELECT column7 FROM testTable ORDER BY column1 LIMIT 400000";
     BrokerResponseNative brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     ResultTable resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 400_000);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -366,8 +366,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     assertEquals(brokerResponseNative.getNumSegmentsMatched(), 4L);
     assertEquals(brokerResponseNative.getNumEntriesScannedPostFilter(), 800_000L);
     assertEquals(brokerResponseNative.getNumEntriesScannedInFilter(), 0L);
-    assertNotNull(brokerResponseNative.getProcessingExceptions());
-    assertEquals(brokerResponseNative.getProcessingExceptions().size(), 0);
+    assertNotNull(brokerResponseNative.getExceptions());
+    assertEquals(brokerResponseNative.getExceptions().size(), 0);
     DataSchema dataSchema = new DataSchema(new String[]{"column7"},
         new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT_ARRAY});
     assertEquals(resultTable.getDataSchema(), dataSchema);
@@ -382,16 +382,16 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // Run the same query and validate that an exception is thrown since we are running select query on forward index
     // disabled column
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() != null
-        && brokerResponseNative.getProcessingExceptions().size() > 0);
+    assertTrue(brokerResponseNative.getExceptions() != null
+        && brokerResponseNative.getExceptions().size() > 0);
 
     // Re-enable forward index for column7 and column6
     reenableForwardIndexForSomeColumns();
 
     // The first query should work now
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 400_000);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -400,8 +400,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     assertEquals(brokerResponseNative.getNumSegmentsMatched(), 4L);
     assertEquals(brokerResponseNative.getNumEntriesScannedPostFilter(), 800_000L);
     assertEquals(brokerResponseNative.getNumEntriesScannedInFilter(), 0L);
-    assertNotNull(brokerResponseNative.getProcessingExceptions());
-    assertEquals(brokerResponseNative.getProcessingExceptions().size(), 0);
+    assertNotNull(brokerResponseNative.getExceptions());
+    assertEquals(brokerResponseNative.getExceptions().size(), 0);
     dataSchema = new DataSchema(new String[]{"column7"},
         new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT_ARRAY});
     assertEquals(resultTable.getDataSchema(), dataSchema);
@@ -434,8 +434,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // This is just a sanity check to ensure the query works when forward index is enabled
     String query = "SELECT DISTINCT column1, column7, column9 FROM testTable ORDER BY column1 LIMIT 10";
     BrokerResponseNative brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     ResultTable resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -473,8 +473,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // Distinct query without filters including column7
     query = "SELECT DISTINCT column1, column7, column9, column6 FROM testTable ORDER BY column1 LIMIT 10";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -504,8 +504,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     String query = "SELECT column1, column7 FROM testTable GROUP BY column1, column7 ORDER BY column1, column7 "
         + " LIMIT 10";
     BrokerResponseNative brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     ResultTable resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -553,8 +553,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     query = "SELECT column1, column7, column6 FROM testTable GROUP BY column1, column7, column6 ORDER BY column1, "
         + "column7, column6 LIMIT 10";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -578,8 +578,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     query = "SELECT ARRAYLENGTH(column7) FROM testTable GROUP BY ARRAYLENGTH(column7) ORDER BY "
         + "ARRAYLENGTH(column7) LIMIT 10";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -605,8 +605,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // This is just a sanity check to ensure the query works when forward index is enabled
     String query = "SELECT MAX(ARRAYLENGTH(column7)) from testTable LIMIT 10";
     BrokerResponseNative brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     ResultTable resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 1);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -627,8 +627,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // This is just a sanity check to ensure the query works when forward index is enabled
     query = "SELECT summv(column7), avgmv(column7) from testTable";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 1);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -663,8 +663,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     query = "SELECT column1, max(column1), sum(column9) from testTable WHERE column7 = 2147483647 GROUP BY "
         + "column1 ORDER BY column1";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 10);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -699,8 +699,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
 
     query = "SELECT MAX(ARRAYLENGTH(column7)) from testTable LIMIT 10";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 1);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -720,8 +720,8 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     // Not allowed aggregation functions on non-forwardIndexDisabled columns
     query = "SELECT summv(column7), avgmv(column7), summv(column6) from testTable";
     brokerResponseNative = getBrokerResponse(query);
-    assertTrue(brokerResponseNative.getProcessingExceptions() == null
-        || brokerResponseNative.getProcessingExceptions().size() == 0);
+    assertTrue(brokerResponseNative.getExceptions() == null
+        || brokerResponseNative.getExceptions().size() == 0);
     resultTable = brokerResponseNative.getResultTable();
     assertEquals(brokerResponseNative.getNumRowsResultSet(), 1);
     assertEquals(brokerResponseNative.getTotalDocs(), 400_000L);
@@ -754,7 +754,7 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     Set<String> forwardIndexDisabledColumns = new HashSet<>(_forwardIndexDisabledColumns);
     forwardIndexDisabledColumns.add("column7");
     indexLoadingConfig.setForwardIndexDisabledColumns(forwardIndexDisabledColumns);
-    indexLoadingConfig.getNoDictionaryColumns().remove("column7");
+    indexLoadingConfig.removeNoDictionaryColumns("column7");
     indexLoadingConfig.setReadMode(ReadMode.heap);
 
     // Reload the segments to pick up the new configs
@@ -785,7 +785,7 @@ public class ForwardIndexDisabledMultiValueQueriesWithReloadTest extends BaseQue
     Set<String> forwardIndexDisabledColumns = new HashSet<>(_forwardIndexDisabledColumns);
     forwardIndexDisabledColumns.remove("column6");
     indexLoadingConfig.setForwardIndexDisabledColumns(forwardIndexDisabledColumns);
-    indexLoadingConfig.getNoDictionaryColumns().add("column7");
+    indexLoadingConfig.addNoDictionaryColumns("column7");
     indexLoadingConfig.setReadMode(ReadMode.heap);
 
     // Reload the segments to pick up the new configs

@@ -32,6 +32,7 @@ import org.apache.pinot.common.request.context.predicate.Predicate;
 import org.apache.pinot.common.request.context.predicate.RegexpLikePredicate;
 import org.apache.pinot.common.request.context.predicate.TextContainsPredicate;
 import org.apache.pinot.common.request.context.predicate.TextMatchPredicate;
+import org.apache.pinot.common.request.context.predicate.VectorSimilarityPredicate;
 import org.apache.pinot.core.geospatial.transform.function.StDistanceFunction;
 import org.apache.pinot.core.operator.filter.BaseFilterOperator;
 import org.apache.pinot.core.operator.filter.BitmapBasedFilterOperator;
@@ -44,6 +45,7 @@ import org.apache.pinot.core.operator.filter.JsonMatchFilterOperator;
 import org.apache.pinot.core.operator.filter.MatchAllFilterOperator;
 import org.apache.pinot.core.operator.filter.TextContainsFilterOperator;
 import org.apache.pinot.core.operator.filter.TextMatchFilterOperator;
+import org.apache.pinot.core.operator.filter.VectorSimilarityFilterOperator;
 import org.apache.pinot.core.operator.filter.predicate.FSTBasedRegexpPredicateEvaluatorFactory;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluatorProvider;
@@ -51,54 +53,53 @@ import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.local.realtime.impl.invertedindex.NativeMutableTextIndex;
 import org.apache.pinot.segment.local.segment.index.readers.text.NativeTextIndexReader;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.reader.JsonIndexReader;
 import org.apache.pinot.segment.spi.index.reader.NullValueVectorReader;
 import org.apache.pinot.segment.spi.index.reader.TextIndexReader;
+import org.apache.pinot.segment.spi.index.reader.VectorIndexReader;
+import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.exception.BadQueryRequestException;
 import org.roaringbitmap.buffer.MutableRoaringBitmap;
 
 
 public class FilterPlanNode implements PlanNode {
-
   private final IndexSegment _indexSegment;
+  private final SegmentContext _segmentContext;
   private final QueryContext _queryContext;
   private final FilterContext _filter;
 
   // Cache the predicate evaluators
   private final List<Pair<Predicate, PredicateEvaluator>> _predicateEvaluators = new ArrayList<>(4);
 
-  public FilterPlanNode(IndexSegment indexSegment, QueryContext queryContext) {
-    this(indexSegment, queryContext, null);
+  public FilterPlanNode(SegmentContext segmentContext, QueryContext queryContext) {
+    this(segmentContext, queryContext, null);
   }
 
-  public FilterPlanNode(IndexSegment indexSegment, QueryContext queryContext, @Nullable FilterContext filter) {
-    _indexSegment = indexSegment;
+  public FilterPlanNode(SegmentContext segmentContext, QueryContext queryContext, @Nullable FilterContext filter) {
+    _indexSegment = segmentContext.getIndexSegment();
+    _segmentContext = segmentContext;
     _queryContext = queryContext;
-    _filter = filter;
+    _filter = filter != null ? filter : _queryContext.getFilter();
   }
 
   @Override
   public BaseFilterOperator run() {
-    // NOTE: Snapshot the validDocIds before reading the numDocs to prevent the latest updates getting lost
-    ThreadSafeMutableRoaringBitmap validDocIds = _indexSegment.getValidDocIds();
-    MutableRoaringBitmap validDocIdsSnapshot =
-        validDocIds != null && !_queryContext.isSkipUpsert() ? validDocIds.getMutableRoaringBitmap() : null;
+    MutableRoaringBitmap queryableDocIdsSnapshot = _segmentContext.getQueryableDocIdsSnapshot();
     int numDocs = _indexSegment.getSegmentMetadata().getTotalDocs();
 
-    FilterContext filter = _filter != null ? _filter : _queryContext.getFilter();
-    if (filter != null) {
-      BaseFilterOperator filterOperator = constructPhysicalOperator(filter, numDocs);
-      if (validDocIdsSnapshot != null) {
-        BaseFilterOperator validDocFilter = new BitmapBasedFilterOperator(validDocIdsSnapshot, false, numDocs);
+    if (_filter != null) {
+      BaseFilterOperator filterOperator = constructPhysicalOperator(_filter, numDocs);
+      if (queryableDocIdsSnapshot != null) {
+        BaseFilterOperator validDocFilter = new BitmapBasedFilterOperator(queryableDocIdsSnapshot, false, numDocs);
         return FilterOperatorUtils.getAndFilterOperator(_queryContext, Arrays.asList(filterOperator, validDocFilter),
             numDocs);
       } else {
         return filterOperator;
       }
-    } else if (validDocIdsSnapshot != null) {
-      return new BitmapBasedFilterOperator(validDocIdsSnapshot, false, numDocs);
+    } else if (queryableDocIdsSnapshot != null) {
+      return new BitmapBasedFilterOperator(queryableDocIdsSnapshot, false, numDocs);
     } else {
       return new MatchAllFilterOperator(numDocs);
     }
@@ -142,7 +143,8 @@ public class FilterPlanNode implements PlanNode {
         findLiteral = true;
       }
     }
-    return columnName != null && _indexSegment.getDataSource(columnName).getH3Index() != null && findLiteral;
+    return columnName != null && _indexSegment.getDataSource(columnName).getH3Index() != null && findLiteral
+        && _queryContext.isIndexUseAllowed(columnName, FieldConfig.IndexType.H3);
   }
 
   /**
@@ -172,14 +174,16 @@ public class FilterPlanNode implements PlanNode {
       if (arguments.get(0).getType() == ExpressionContext.Type.IDENTIFIER
           && arguments.get(1).getType() == ExpressionContext.Type.LITERAL) {
         String columnName = arguments.get(0).getIdentifier();
-        return _indexSegment.getDataSource(columnName).getH3Index() != null;
+        return _indexSegment.getDataSource(columnName).getH3Index() != null
+            && _queryContext.isIndexUseAllowed(columnName, FieldConfig.IndexType.H3);
       }
       return false;
     } else {
       if (arguments.get(1).getType() == ExpressionContext.Type.IDENTIFIER
           && arguments.get(0).getType() == ExpressionContext.Type.LITERAL) {
         String columnName = arguments.get(1).getIdentifier();
-        return _indexSegment.getDataSource(columnName).getH3Index() != null;
+        return _indexSegment.getDataSource(columnName).getH3Index() != null
+            && _queryContext.isIndexUseAllowed(columnName, FieldConfig.IndexType.H3);
       }
       return false;
     }
@@ -228,13 +232,12 @@ public class FilterPlanNode implements PlanNode {
         ExpressionContext lhs = predicate.getLhs();
         if (lhs.getType() == ExpressionContext.Type.FUNCTION) {
           if (canApplyH3IndexForDistanceCheck(predicate, lhs.getFunction())) {
-            return new H3IndexFilterOperator(_indexSegment, predicate, numDocs);
+            return new H3IndexFilterOperator(_indexSegment, _queryContext, predicate, numDocs);
           } else if (canApplyH3IndexForInclusionCheck(predicate, lhs.getFunction())) {
-            return new H3InclusionIndexFilterOperator(_indexSegment, predicate, _queryContext, numDocs);
+            return new H3InclusionIndexFilterOperator(_indexSegment, _queryContext, predicate, numDocs);
           } else {
-            // TODO: ExpressionFilterOperator does not support predicate types without PredicateEvaluator (IS_NULL,
-            //       IS_NOT_NULL, TEXT_MATCH)
-            return new ExpressionFilterOperator(_indexSegment, predicate, numDocs);
+            // TODO: ExpressionFilterOperator does not support predicate types without PredicateEvaluator (TEXT_MATCH)
+            return new ExpressionFilterOperator(_indexSegment, _queryContext, predicate, numDocs);
           }
         } else {
           String column = lhs.getIdentifier();
@@ -250,9 +253,8 @@ public class FilterPlanNode implements PlanNode {
               return new TextContainsFilterOperator(textIndexReader, (TextContainsPredicate) predicate, numDocs);
             case TEXT_MATCH:
               textIndexReader = dataSource.getTextIndex();
-              Preconditions
-                  .checkState(textIndexReader != null, "Cannot apply TEXT_MATCH on column: %s without text index",
-                      column);
+              Preconditions.checkState(textIndexReader != null,
+                  "Cannot apply TEXT_MATCH on column: %s without text index", column);
               // We could check for real time and segment Lucene reader, but easier to check the other way round
               if (textIndexReader instanceof NativeTextIndexReader
                   || textIndexReader instanceof NativeMutableTextIndex) {
@@ -278,13 +280,17 @@ public class FilterPlanNode implements PlanNode {
                         dataSource.getDataSourceMetadata().getDataType());
               }
               _predicateEvaluators.add(Pair.of(predicate, predicateEvaluator));
-              return FilterOperatorUtils.getLeafFilterOperator(predicateEvaluator, dataSource, numDocs,
-                  _queryContext.isNullHandlingEnabled());
+              return FilterOperatorUtils.getLeafFilterOperator(_queryContext, predicateEvaluator, dataSource, numDocs);
             case JSON_MATCH:
               JsonIndexReader jsonIndex = dataSource.getJsonIndex();
               Preconditions.checkState(jsonIndex != null, "Cannot apply JSON_MATCH on column: %s without json index",
                   column);
               return new JsonMatchFilterOperator(jsonIndex, (JsonMatchPredicate) predicate, numDocs);
+            case VECTOR_SIMILARITY:
+              VectorIndexReader vectorIndex = dataSource.getVectorIndex();
+              Preconditions.checkState(vectorIndex != null,
+                  "Cannot apply VECTOR_SIMILARITY on column: %s without vector index", column);
+              return new VectorSimilarityFilterOperator(vectorIndex, (VectorSimilarityPredicate) predicate, numDocs);
             case IS_NULL:
               NullValueVectorReader nullValueVector = dataSource.getNullValueVector();
               if (nullValueVector != null) {
@@ -301,13 +307,13 @@ public class FilterPlanNode implements PlanNode {
               }
             default:
               predicateEvaluator =
-                  PredicateEvaluatorProvider.getPredicateEvaluator(predicate, dataSource.getDictionary(),
-                      dataSource.getDataSourceMetadata().getDataType());
+                  PredicateEvaluatorProvider.getPredicateEvaluator(predicate, dataSource, _queryContext);
               _predicateEvaluators.add(Pair.of(predicate, predicateEvaluator));
-              return FilterOperatorUtils.getLeafFilterOperator(predicateEvaluator, dataSource, numDocs,
-                  _queryContext.isNullHandlingEnabled());
+              return FilterOperatorUtils.getLeafFilterOperator(_queryContext, predicateEvaluator, dataSource, numDocs);
           }
         }
+      case CONSTANT:
+        return filter.isConstantTrue() ? new MatchAllFilterOperator(numDocs) : EmptyFilterOperator.getInstance();
       default:
         throw new IllegalStateException();
     }

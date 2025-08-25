@@ -18,10 +18,9 @@
  */
 package org.apache.pinot.plugin.stream.kinesis;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Preconditions;
-import java.io.IOException;
 import java.util.Map;
 import org.apache.pinot.spi.stream.StreamPartitionMsgOffset;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -29,8 +28,7 @@ import org.apache.pinot.spi.utils.JsonUtils;
 
 /**
  * A {@link StreamPartitionMsgOffset} implementation for the Kinesis partition group consumption
- * A partition group consists of 1 or more shards. The KinesisCheckpoint maintains a Map of shards to the
- * sequenceNumber.
+ * A partition group consists of 1 shard. The KinesisCheckpoint maintains the shardId and sequenceNumber.
  * The sequenceNumber is the id (equivalent to offset in kafka) for the messages in the shard.
  * From the Kinesis documentation:
  * Each data record has a sequence number that is unique per partition-key within its shard.
@@ -40,55 +38,41 @@ import org.apache.pinot.spi.utils.JsonUtils;
  * The longer the time period between write requests, the larger the sequence numbers become.
  */
 public class KinesisPartitionGroupOffset implements StreamPartitionMsgOffset {
-  private final Map<String, String> _shardToStartSequenceMap;
+  private final String _shardId;
+  private final String _sequenceNumber;
 
-  public KinesisPartitionGroupOffset(Map<String, String> shardToStartSequenceMap) {
-    _shardToStartSequenceMap = shardToStartSequenceMap;
+  public KinesisPartitionGroupOffset(String shardId, String sequenceNumber) {
+    _shardId = shardId;
+    _sequenceNumber = sequenceNumber;
   }
 
-  public KinesisPartitionGroupOffset(String offsetStr)
-      throws IOException {
-    _shardToStartSequenceMap = JsonUtils.stringToObject(offsetStr, new TypeReference<Map<String, String>>() {
-    });
+  public KinesisPartitionGroupOffset(String offsetStr) {
+    try {
+      ObjectNode objectNode = (ObjectNode) JsonUtils.stringToJsonNode(offsetStr);
+      Preconditions.checkArgument(objectNode.size() == 1);
+      Map.Entry<String, JsonNode> entry = objectNode.fields().next();
+      _shardId = entry.getKey();
+      _sequenceNumber = entry.getValue().asText();
+    } catch (Exception e) {
+      throw new IllegalArgumentException("Invalid Kinesis offset: " + offsetStr);
+    }
   }
 
-  public Map<String, String> getShardToStartSequenceMap() {
-    return _shardToStartSequenceMap;
+  public String getShardId() {
+    return _shardId;
+  }
+
+  public String getSequenceNumber() {
+    return _sequenceNumber;
   }
 
   @Override
   public String toString() {
-    try {
-      return JsonUtils.objectToString(_shardToStartSequenceMap);
-    } catch (JsonProcessingException e) {
-      throw new IllegalStateException(
-          "Caught exception when converting KinesisCheckpoint to string: " + _shardToStartSequenceMap);
-    }
+    return JsonUtils.newObjectNode().put(_shardId, _sequenceNumber).toString();
   }
 
   @Override
-  public KinesisPartitionGroupOffset fromString(String kinesisCheckpointStr) {
-    try {
-      return new KinesisPartitionGroupOffset(kinesisCheckpointStr);
-    } catch (IOException e) {
-      throw new IllegalStateException(
-          "Caught exception when converting string to KinesisCheckpoint: " + kinesisCheckpointStr);
-    }
-  }
-
-  @Override
-  public int compareTo(StreamPartitionMsgOffset o) {
-    Preconditions.checkNotNull(o);
-    KinesisPartitionGroupOffset other = (KinesisPartitionGroupOffset) o;
-    Preconditions.checkNotNull(other._shardToStartSequenceMap);
-    Preconditions.checkNotNull(_shardToStartSequenceMap);
-    Preconditions
-        .checkState(other._shardToStartSequenceMap.size() == 1, "Only 1 shard per consumer supported. Found: %s",
-            other._shardToStartSequenceMap);
-    Preconditions
-        .checkState(_shardToStartSequenceMap.size() == 1, "Only 1 shard per consumer supported. Found: %s",
-            _shardToStartSequenceMap);
-    return _shardToStartSequenceMap.values().iterator().next()
-        .compareTo(other._shardToStartSequenceMap.values().iterator().next());
+  public int compareTo(StreamPartitionMsgOffset other) {
+    return _sequenceNumber.compareTo(((KinesisPartitionGroupOffset) other)._sequenceNumber);
   }
 }

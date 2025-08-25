@@ -60,17 +60,21 @@ import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.StreamingOutput;
-import org.apache.commons.httpclient.HttpConnectionManager;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
+import org.apache.pinot.common.restlet.resources.EndReplaceSegmentsRequest;
+import org.apache.pinot.common.restlet.resources.RevertReplaceSegmentsRequest;
 import org.apache.pinot.common.restlet.resources.StartReplaceSegmentsRequest;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
+import org.apache.pinot.common.utils.FileUploadDownloadClient.FileUploadType;
 import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.common.utils.fetcher.SegmentFetcherFactory;
 import org.apache.pinot.controller.ControllerConf;
@@ -83,6 +87,9 @@ import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.api.upload.SegmentValidationUtils;
 import org.apache.pinot.controller.api.upload.ZKOperator;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.core.metadata.DefaultMetadataExtractor;
 import org.apache.pinot.core.metadata.MetadataExtractorFactory;
 import org.apache.pinot.segment.spi.SegmentMetadata;
@@ -94,7 +101,6 @@ import org.apache.pinot.spi.filesystem.PinotFS;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
-import org.apache.pinot.spi.utils.StringUtil;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.glassfish.grizzly.http.server.Request;
 import org.glassfish.jersey.media.multipart.FormDataBodyPart;
@@ -103,12 +109,18 @@ import org.glassfish.jersey.server.ManagedAsync;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.SEGMENT_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.SEGMENT_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotSegmentUploadDownloadRestletResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotSegmentUploadDownloadRestletResource.class);
@@ -125,7 +137,7 @@ public class PinotSegmentUploadDownloadRestletResource {
   ControllerMetrics _controllerMetrics;
 
   @Inject
-  HttpConnectionManager _connectionManager;
+  HttpClientConnectionManager _connectionManager;
 
   @Inject
   Executor _executor;
@@ -139,6 +151,7 @@ public class PinotSegmentUploadDownloadRestletResource {
   @GET
   @Produces(MediaType.APPLICATION_OCTET_STREAM)
   @Path("/segments/{tableName}/{segmentName}")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.DOWNLOAD_SEGMENT)
   @ApiOperation(value = "Download a segment", notes = "Download a segment")
   @TrackInflightRequestMetrics
   @TrackedByGauge(gauge = ControllerGauge.SEGMENT_DOWNLOADS_IN_PROGRESS)
@@ -148,6 +161,7 @@ public class PinotSegmentUploadDownloadRestletResource {
       @ApiParam(value = "Name of the segment", required = true) @PathParam("segmentName") @Encoded String segmentName,
       @Context HttpHeaders httpHeaders)
       throws Exception {
+    tableName = DatabaseUtils.translateTableName(tableName, httpHeaders);
     // Validate data access
     boolean hasDataAccess;
     try {
@@ -167,7 +181,12 @@ public class PinotSegmentUploadDownloadRestletResource {
     File segmentFile;
     // If the segment file is local, just use it as the return entity; otherwise copy it from remote to local first.
     if (CommonConstants.Segment.LOCAL_SEGMENT_SCHEME.equals(dataDirURI.getScheme())) {
-      segmentFile = new File(new File(dataDirURI), StringUtil.join(File.separator, tableName, segmentName));
+      File dataDir = new File(dataDirURI);
+      File tableDir = org.apache.pinot.common.utils.FileUtils.concatAndValidateFile(dataDir, tableName,
+          "Invalid table name: %s", tableName);
+      segmentFile = org.apache.pinot.common.utils.FileUtils.concatAndValidateFile(tableDir, segmentName,
+          "Invalid segment name: %s", segmentName);
+
       if (!segmentFile.exists()) {
         throw new ControllerApplicationException(LOGGER,
             "Segment " + segmentName + " or table " + tableName + " not found in " + segmentFile.getAbsolutePath(),
@@ -182,8 +201,13 @@ public class PinotSegmentUploadDownloadRestletResource {
             "Segment: " + segmentName + " of table: " + tableName + " not found at: " + remoteSegmentFileURI,
             Response.Status.NOT_FOUND);
       }
-      segmentFile = new File(new File(ControllerFilePathProvider.getInstance().getFileDownloadTempDir(), tableName),
-          segmentName + "-" + UUID.randomUUID());
+      File downloadTempDir = ControllerFilePathProvider.getInstance().getFileDownloadTempDir();
+      File tableDir = org.apache.pinot.common.utils.FileUtils.concatAndValidateFile(downloadTempDir, tableName,
+          "Invalid table name: %s", tableName);
+      segmentFile =
+          org.apache.pinot.common.utils.FileUtils.concatAndValidateFile(tableDir, segmentName + "-" + UUID.randomUUID(),
+              "Invalid segment name: %s", segmentName);
+
       pinotFS.copyToLocalFile(remoteSegmentFileURI, segmentFile);
       // Streaming in the tmp file and delete it afterward.
       builder.entity((StreamingOutput) output -> {
@@ -233,7 +257,7 @@ public class PinotSegmentUploadDownloadRestletResource {
       tempSegmentDir = new File(provider.getUntarredFileTempDir(), tempFileName);
 
       boolean uploadedSegmentIsEncrypted = StringUtils.isNotEmpty(crypterClassNameInHeader);
-      FileUploadDownloadClient.FileUploadType uploadType = getUploadType(uploadTypeStr);
+      FileUploadType uploadType = getUploadType(uploadTypeStr);
       File destFile = uploadedSegmentIsEncrypted ? tempEncryptedFile : tempDecryptedFile;
       long segmentSizeInBytes;
       switch (uploadType) {
@@ -329,11 +353,17 @@ public class PinotSegmentUploadDownloadRestletResource {
       if (tableConfig.getIngestionConfig() == null || tableConfig.getIngestionConfig().isSegmentTimeValueCheck()) {
         SegmentValidationUtils.validateTimeInterval(segmentMetadata, tableConfig);
       }
-      if (uploadType != FileUploadDownloadClient.FileUploadType.METADATA) {
-        SegmentValidationUtils.checkStorageQuota(tempSegmentDir, segmentMetadata, tableConfig,
-            _pinotHelixResourceManager, _controllerConf, _controllerMetrics, _connectionManager, _executor,
-            _leadControllerManager.isLeaderForTable(tableNameWithType));
+      long untarredSegmentSizeInBytes;
+      if (uploadType == FileUploadType.METADATA && segmentSizeInBytes > 0) {
+        // TODO: Include the untarred segment size when using the METADATA push rest API. Currently we can only use the
+        //       tarred segment size as an approximation.
+        untarredSegmentSizeInBytes = segmentSizeInBytes;
+      } else {
+        untarredSegmentSizeInBytes = FileUtils.sizeOfDirectory(tempSegmentDir);
       }
+      SegmentValidationUtils.checkStorageQuota(segmentName, untarredSegmentSizeInBytes, tableConfig,
+          _pinotHelixResourceManager, _controllerConf, _controllerMetrics, _connectionManager, _executor,
+          _leadControllerManager);
 
       // Encrypt segment
       String crypterNameInTableConfig = tableConfig.getValidationConfig().getCrypterClassName();
@@ -457,6 +487,7 @@ public class PinotSegmentUploadDownloadRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
   @Path("/segments")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.UPLOAD_SEGMENT)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Upload a segment", notes = "Upload a segment as json")
   @ApiResponses(value = {
@@ -497,6 +528,7 @@ public class PinotSegmentUploadDownloadRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.MULTIPART_FORM_DATA)
   @Path("/segments")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.UPLOAD_SEGMENT)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Upload a segment", notes = "Upload a segment as binary")
   @ApiResponses(value = {
@@ -535,6 +567,7 @@ public class PinotSegmentUploadDownloadRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
   @Path("/v2/segments")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.UPLOAD_SEGMENT)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Upload a segment", notes = "Upload a segment as json")
   @ApiResponses(value = {
@@ -576,6 +609,7 @@ public class PinotSegmentUploadDownloadRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.MULTIPART_FORM_DATA)
   @Path("/v2/segments")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.UPLOAD_SEGMENT)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Upload a segment", notes = "Upload a segment as binary")
   @ApiResponses(value = {
@@ -611,6 +645,7 @@ public class PinotSegmentUploadDownloadRestletResource {
 
   @POST
   @Path("segments/{tableName}/startReplaceSegments")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.REPLACE_SEGMENT)
   @Authenticate(AccessType.UPDATE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Start to replace segments", notes = "Start to replace segments")
@@ -619,7 +654,8 @@ public class PinotSegmentUploadDownloadRestletResource {
       @ApiParam(value = "OFFLINE|REALTIME", required = true) @QueryParam("type") String tableTypeStr,
       @ApiParam(value = "Force cleanup") @QueryParam("forceCleanup") @DefaultValue("false") boolean forceCleanup,
       @ApiParam(value = "Fields belonging to start replace segment request", required = true)
-          StartReplaceSegmentsRequest startReplaceSegmentsRequest) {
+      StartReplaceSegmentsRequest startReplaceSegmentsRequest, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     TableType tableType = Constants.validateTableType(tableTypeStr);
     if (tableType == null) {
       throw new ControllerApplicationException(LOGGER, "Table type should either be offline or realtime",
@@ -629,7 +665,8 @@ public class PinotSegmentUploadDownloadRestletResource {
         ResourceUtils.getExistingTableNamesWithType(_pinotHelixResourceManager, tableName, tableType, LOGGER).get(0);
     try {
       String segmentLineageEntryId = _pinotHelixResourceManager.startReplaceSegments(tableNameWithType,
-          startReplaceSegmentsRequest.getSegmentsFrom(), startReplaceSegmentsRequest.getSegmentsTo(), forceCleanup);
+          startReplaceSegmentsRequest.getSegmentsFrom(), startReplaceSegmentsRequest.getSegmentsTo(), forceCleanup,
+          startReplaceSegmentsRequest.getCustomMap());
       return Response.ok(JsonUtils.newObjectNode().put("segmentLineageEntryId", segmentLineageEntryId)).build();
     } catch (Exception e) {
       _controllerMetrics.addMeteredTableValue(tableNameWithType, ControllerMeter.NUMBER_START_REPLACE_FAILURE, 1);
@@ -639,6 +676,7 @@ public class PinotSegmentUploadDownloadRestletResource {
 
   @POST
   @Path("segments/{tableName}/endReplaceSegments")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.REPLACE_SEGMENT)
   @Authenticate(AccessType.UPDATE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "End to replace segments", notes = "End to replace segments")
@@ -646,7 +684,10 @@ public class PinotSegmentUploadDownloadRestletResource {
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
       @ApiParam(value = "OFFLINE|REALTIME", required = true) @QueryParam("type") String tableTypeStr,
       @ApiParam(value = "Segment lineage entry id returned by startReplaceSegments API", required = true)
-      @QueryParam("segmentLineageEntryId") String segmentLineageEntryId) {
+      @QueryParam("segmentLineageEntryId") String segmentLineageEntryId,
+      @ApiParam(value = "Fields belonging to end replace segment request")
+          EndReplaceSegmentsRequest endReplaceSegmentsRequest, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     TableType tableType = Constants.validateTableType(tableTypeStr);
     if (tableType == null) {
       throw new ControllerApplicationException(LOGGER, "Table type should either be offline or realtime",
@@ -657,7 +698,8 @@ public class PinotSegmentUploadDownloadRestletResource {
     try {
       // Check that the segment lineage entry id is valid
       Preconditions.checkNotNull(segmentLineageEntryId, "'segmentLineageEntryId' should not be null");
-      _pinotHelixResourceManager.endReplaceSegments(tableNameWithType, segmentLineageEntryId);
+      _pinotHelixResourceManager.endReplaceSegments(tableNameWithType, segmentLineageEntryId,
+          endReplaceSegmentsRequest);
       return Response.ok().build();
     } catch (Exception e) {
       _controllerMetrics.addMeteredTableValue(tableNameWithType, ControllerMeter.NUMBER_END_REPLACE_FAILURE, 1);
@@ -667,6 +709,7 @@ public class PinotSegmentUploadDownloadRestletResource {
 
   @POST
   @Path("segments/{tableName}/revertReplaceSegments")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.REPLACE_SEGMENT)
   @Authenticate(AccessType.UPDATE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Revert segments replacement", notes = "Revert segments replacement")
@@ -676,7 +719,10 @@ public class PinotSegmentUploadDownloadRestletResource {
       @ApiParam(value = "Segment lineage entry id to revert", required = true) @QueryParam("segmentLineageEntryId")
           String segmentLineageEntryId,
       @ApiParam(value = "Force revert in case the user knows that the lineage entry is interrupted")
-      @QueryParam("forceRevert") @DefaultValue("false") boolean forceRevert) {
+      @QueryParam("forceRevert") @DefaultValue("false") boolean forceRevert,
+      @ApiParam(value = "Fields belonging to revert replace segment request")
+      RevertReplaceSegmentsRequest revertReplaceSegmentsRequest, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     TableType tableType = Constants.validateTableType(tableTypeStr);
     if (tableType == null) {
       throw new ControllerApplicationException(LOGGER, "Table type should either be offline or realtime",
@@ -687,7 +733,8 @@ public class PinotSegmentUploadDownloadRestletResource {
     try {
       // Check that the segment lineage entry id is valid
       Preconditions.checkNotNull(segmentLineageEntryId, "'segmentLineageEntryId' should not be null");
-      _pinotHelixResourceManager.revertReplaceSegments(tableNameWithType, segmentLineageEntryId, forceRevert);
+      _pinotHelixResourceManager.revertReplaceSegments(tableNameWithType, segmentLineageEntryId, forceRevert,
+          revertReplaceSegmentsRequest);
       return Response.ok().build();
     } catch (Exception e) {
       _controllerMetrics.addMeteredTableValue(tableNameWithType, ControllerMeter.NUMBER_REVERT_REPLACE_FAILURE, 1);
@@ -712,11 +759,11 @@ public class PinotSegmentUploadDownloadRestletResource {
     }
   }
 
-  private FileUploadDownloadClient.FileUploadType getUploadType(String uploadTypeStr) {
+  private FileUploadType getUploadType(String uploadTypeStr) {
     if (uploadTypeStr != null) {
-      return FileUploadDownloadClient.FileUploadType.valueOf(uploadTypeStr);
+      return FileUploadType.valueOf(uploadTypeStr);
     } else {
-      return FileUploadDownloadClient.FileUploadType.getDefaultUploadType();
+      return FileUploadType.getDefaultUploadType();
     }
   }
 

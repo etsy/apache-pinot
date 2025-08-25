@@ -18,9 +18,13 @@
  */
 package org.apache.pinot.broker.broker;
 
+import java.util.Set;
 import org.apache.pinot.broker.api.AccessControl;
 import org.apache.pinot.broker.api.RequesterIdentity;
 import org.apache.pinot.common.request.BrokerRequest;
+import org.apache.pinot.spi.auth.AuthorizationResult;
+import org.apache.pinot.spi.auth.BasicAuthorizationResultImpl;
+import org.apache.pinot.spi.auth.TableAuthorizationResult;
 import org.apache.pinot.spi.env.PinotConfiguration;
 
 
@@ -40,8 +44,13 @@ public class AllowAllAccessControlFactory extends AccessControlFactory {
 
   private static class AllowAllAccessControl implements AccessControl {
     @Override
-    public boolean hasAccess(RequesterIdentity requesterIdentity, BrokerRequest brokerRequest) {
-      return true;
+    public AuthorizationResult authorize(RequesterIdentity requesterIdentity, BrokerRequest brokerRequest) {
+      return BasicAuthorizationResultImpl.success();
+    }
+
+    @Override
+    public TableAuthorizationResult authorize(RequesterIdentity requesterIdentity, Set<String> tables) {
+      return TableAuthorizationResult.success();
     }
   }
 }

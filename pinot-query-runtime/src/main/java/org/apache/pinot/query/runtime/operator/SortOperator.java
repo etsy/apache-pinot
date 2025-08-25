@@ -19,65 +19,97 @@
 package org.apache.pinot.query.runtime.operator;
 
 import com.google.common.annotations.VisibleForTesting;
-import java.util.Comparator;
-import java.util.LinkedList;
+import com.google.common.base.Joiner;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.PriorityQueue;
-import javax.annotation.Nullable;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.pinot.common.datablock.DataBlock;
+import org.apache.pinot.common.datatable.StatMap;
 import org.apache.pinot.common.utils.DataSchema;
-import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.BaseOperator;
 import org.apache.pinot.core.query.selection.SelectionOperatorUtils;
-import org.apache.pinot.query.planner.logical.RexExpression;
+import org.apache.pinot.query.planner.plannode.SortNode;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
-import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
+import org.apache.pinot.query.runtime.operator.utils.SortUtils;
+import org.apache.pinot.query.runtime.plan.OpChainExecutionContext;
+import org.apache.pinot.spi.utils.CommonConstants;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
-public class SortOperator extends BaseOperator<TransferableBlock> {
+public class SortOperator extends MultiStageOperator {
   private static final String EXPLAIN_NAME = "SORT";
-  private final Operator<TransferableBlock> _upstreamOperator;
-  private final int _fetch;
-  private final int _offset;
+  private static final Logger LOGGER = LoggerFactory.getLogger(SortOperator.class);
+
+  private final MultiStageOperator _input;
   private final DataSchema _dataSchema;
-  private final PriorityQueue<Object[]> _rows;
+  private final int _offset;
   private final int _numRowsToKeep;
+  private final PriorityQueue<Object[]> _priorityQueue;
+  private final ArrayList<Object[]> _rows;
+  private final StatMap<StatKey> _statMap = new StatMap<>(StatKey.class);
 
-  private boolean _readyToConstruct;
-  private boolean _isSortedBlockConstructed;
-  private TransferableBlock _upstreamErrorBlock;
+  private boolean _hasConstructedSortedBlock;
+  private TransferableBlock _eosBlock;
 
-  public SortOperator(Operator<TransferableBlock> upstreamOperator, List<RexExpression> collationKeys,
-      List<RelFieldCollation.Direction> collationDirections, int fetch, int offset, DataSchema dataSchema) {
-    this(upstreamOperator, collationKeys, collationDirections, fetch, offset, dataSchema,
-        SelectionOperatorUtils.MAX_ROW_HOLDER_INITIAL_CAPACITY);
+  public SortOperator(OpChainExecutionContext context, MultiStageOperator input, SortNode node) {
+    this(context, input, node, SelectionOperatorUtils.MAX_ROW_HOLDER_INITIAL_CAPACITY,
+        CommonConstants.Broker.DEFAULT_BROKER_QUERY_RESPONSE_LIMIT);
   }
 
   @VisibleForTesting
-  SortOperator(Operator<TransferableBlock> upstreamOperator, List<RexExpression> collationKeys,
-      List<RelFieldCollation.Direction> collationDirections, int fetch, int offset, DataSchema dataSchema,
-      int maxHolderCapacity) {
-    _upstreamOperator = upstreamOperator;
-    _fetch = fetch;
-    _offset = offset;
-    _dataSchema = dataSchema;
-    _upstreamErrorBlock = null;
-    _isSortedBlockConstructed = false;
-    _numRowsToKeep = _fetch > 0
-        ? Math.min(maxHolderCapacity, _fetch + (Math.max(_offset, 0)))
-        : maxHolderCapacity;
-    _rows = new PriorityQueue<>(_numRowsToKeep,
-        new SortComparator(collationKeys, collationDirections, dataSchema, false));
+  SortOperator(OpChainExecutionContext context, MultiStageOperator input, SortNode node, int defaultHolderCapacity,
+      int defaultResponseLimit) {
+    super(context);
+    _input = input;
+    _dataSchema = node.getDataSchema();
+    _offset = Math.max(node.getOffset(), 0);
+    // Setting numRowsToKeep as default maximum on Broker if limit not set.
+    // TODO: make this default behavior configurable.
+    int fetch = node.getFetch();
+    _numRowsToKeep = fetch > 0 ? fetch + _offset : defaultResponseLimit;
+    // Under the following circumstances, the SortOperator is a simple selection with row trim on limit & offset:
+    // - There is no collation
+    // - Input is already sorted
+    List<RelFieldCollation> collations = node.getCollations();
+    if (collations.isEmpty() || input instanceof SortedMailboxReceiveOperator) {
+      _priorityQueue = null;
+      _rows = new ArrayList<>(Math.min(defaultHolderCapacity, _numRowsToKeep));
+    } else {
+      // Use the opposite direction as specified by the collation directions since we need the PriorityQueue to decide
+      // which elements to keep and which to remove based on the limits.
+      _priorityQueue = new PriorityQueue<>(Math.min(defaultHolderCapacity, _numRowsToKeep),
+          new SortUtils.SortComparator(_dataSchema, collations, true));
+      _rows = null;
+    }
   }
 
   @Override
-  public List<Operator> getChildOperators() {
-    // WorkerExecutor doesn't use getChildOperators, returns null here.
-    return null;
+  public void registerExecution(long time, int numRows) {
+    _statMap.merge(StatKey.EXECUTION_TIME_MS, time);
+    _statMap.merge(StatKey.EMITTED_ROWS, numRows);
   }
 
-  @Nullable
+  @Override
+  public Type getOperatorType() {
+    return Type.SORT_OR_LIMIT;
+  }
+
+  @Override
+  protected Logger logger() {
+    return LOGGER;
+  }
+
+  @Override
+  public List<MultiStageOperator> getChildOperators() {
+    return List.of(_input);
+  }
+
+  @Override
+  public void cancel(Throwable e) {
+  }
+
   @Override
   public String toExplainString() {
     return EXPLAIN_NAME;
@@ -85,99 +117,101 @@ public class SortOperator extends BaseOperator<TransferableBlock> {
 
   @Override
   protected TransferableBlock getNextBlock() {
-    try {
-      consumeInputBlocks();
-      return produceSortedBlock();
-    } catch (Exception e) {
-      return TransferableBlockUtils.getErrorTransferableBlock(e);
+    if (_hasConstructedSortedBlock) {
+      assert _eosBlock != null;
+      return _eosBlock;
     }
+    TransferableBlock finalBlock = consumeInputBlocks();
+    // returning upstream error block if finalBlock contains error.
+    if (finalBlock.isErrorBlock()) {
+      return finalBlock;
+    }
+    _statMap.merge(StatKey.REQUIRE_SORT, _priorityQueue != null);
+    _eosBlock = updateEosBlock(finalBlock, _statMap);
+    return produceSortedBlock();
   }
 
   private TransferableBlock produceSortedBlock() {
-    if (_upstreamErrorBlock != null) {
-      return _upstreamErrorBlock;
-    } else if (!_readyToConstruct) {
-      return TransferableBlockUtils.getNoOpTransferableBlock();
-    }
-
-    if (!_isSortedBlockConstructed) {
-      LinkedList<Object[]> rows = new LinkedList<>();
-      while (_rows.size() > _offset) {
-        Object[] row = _rows.poll();
-        rows.addFirst(row);
-      }
-      _isSortedBlockConstructed = true;
-      if (rows.size() == 0) {
-        return TransferableBlockUtils.getEndOfStreamTransferableBlock();
+    _hasConstructedSortedBlock = true;
+    if (_priorityQueue == null) {
+      if (_rows.size() > _offset) {
+        List<Object[]> row = _rows.subList(_offset, _rows.size());
+        return new TransferableBlock(row, _dataSchema, DataBlock.Type.ROW);
       } else {
-        return new TransferableBlock(rows, _dataSchema, DataBlock.Type.ROW);
+        return _eosBlock;
       }
     } else {
-      return TransferableBlockUtils.getEndOfStreamTransferableBlock();
+      int resultSize = _priorityQueue.size() - _offset;
+      if (resultSize <= 0) {
+        return _eosBlock;
+      }
+      Object[][] rowsArr = new Object[resultSize][];
+      for (int i = resultSize - 1; i >= 0; i--) {
+        Object[] row = _priorityQueue.poll();
+        rowsArr[i] = row;
+      }
+      return new TransferableBlock(Arrays.asList(rowsArr), _dataSchema, DataBlock.Type.ROW);
     }
   }
 
-  private void consumeInputBlocks() {
-    if (!_isSortedBlockConstructed) {
-      TransferableBlock block = _upstreamOperator.nextBlock();
-      while (!block.isNoOpBlock()) {
-        // setting upstream error block
-        if (block.isErrorBlock()) {
-          _upstreamErrorBlock = block;
-          return;
-        } else if (TransferableBlockUtils.isEndOfStream(block)) {
-          _readyToConstruct = true;
-          return;
+  private TransferableBlock consumeInputBlocks() {
+    TransferableBlock block = _input.nextBlock();
+    while (block.isDataBlock()) {
+      List<Object[]> container = block.getContainer();
+      if (_priorityQueue == null) {
+        // TODO: when push-down properly, we shouldn't get more than _numRowsToKeep
+        int numRows = _rows.size();
+        if (numRows < _numRowsToKeep) {
+          if (numRows + container.size() < _numRowsToKeep) {
+            _rows.addAll(container);
+          } else {
+            _rows.addAll(container.subList(0, _numRowsToKeep - numRows));
+            if (LOGGER.isDebugEnabled()) {
+              // this operatorId is an old name. It is being kept to avoid breaking changes on the log message.
+              String operatorId =
+                  Joiner.on("_").join(getClass().getSimpleName(), _context.getStageId(), _context.getServer());
+              LOGGER.debug("Early terminate at SortOperator - operatorId={}, opChainId={}", operatorId,
+                  _context.getId());
+            }
+            // setting operator to be early terminated and awaits EOS block next.
+            earlyTerminate();
+          }
         }
-
-        List<Object[]> container = block.getContainer();
+      } else {
         for (Object[] row : container) {
-          SelectionOperatorUtils.addToPriorityQueue(row, _rows, _numRowsToKeep);
+          SelectionOperatorUtils.addToPriorityQueue(row, _priorityQueue, _numRowsToKeep);
         }
-
-        block = _upstreamOperator.nextBlock();
       }
+      block = _input.nextBlock();
     }
+    return block;
   }
 
-  private static class SortComparator implements Comparator<Object[]> {
-    private final int _size;
-    private final int[] _valueIndices;
-    private final int[] _multipliers;
-    private final boolean[] _useDoubleComparison;
-
-    public SortComparator(List<RexExpression> collationKeys, List<RelFieldCollation.Direction> collationDirections,
-        DataSchema dataSchema, boolean isNullHandlingEnabled) {
-      DataSchema.ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-      _size = collationKeys.size();
-      _valueIndices = new int[_size];
-      _multipliers = new int[_size];
-      _useDoubleComparison = new boolean[_size];
-      for (int i = 0; i < _size; i++) {
-        _valueIndices[i] = ((RexExpression.InputRef) collationKeys.get(i)).getIndex();
-        _multipliers[i] = collationDirections.get(i).isDescending() ? 1 : -1;
-        _useDoubleComparison[i] = columnDataTypes[_valueIndices[i]].isNumber();
+  public enum StatKey implements StatMap.Key {
+    //@formatter:off
+    EXECUTION_TIME_MS(StatMap.Type.LONG) {
+      @Override
+      public boolean includeDefaultInJson() {
+        return true;
       }
+    },
+    EMITTED_ROWS(StatMap.Type.LONG), REQUIRE_SORT(StatMap.Type.BOOLEAN) {
+      @Override
+      public boolean includeDefaultInJson() {
+        return true;
+      }
+    };
+    //@formatter:on
+
+    private final StatMap.Type _type;
+
+    StatKey(StatMap.Type type) {
+      _type = type;
     }
 
     @Override
-    public int compare(Object[] o1, Object[] o2) {
-      for (int i = 0; i < _size; i++) {
-        int index = _valueIndices[i];
-        Object v1 = o1[index];
-        Object v2 = o2[index];
-        int result;
-        if (_useDoubleComparison[i]) {
-          result = Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
-        } else {
-          //noinspection unchecked
-          result = ((Comparable) v1).compareTo(v2);
-        }
-        if (result != 0) {
-          return result * _multipliers[i];
-        }
-      }
-      return 0;
+    public StatMap.Type getType() {
+      return _type;
     }
   }
 }

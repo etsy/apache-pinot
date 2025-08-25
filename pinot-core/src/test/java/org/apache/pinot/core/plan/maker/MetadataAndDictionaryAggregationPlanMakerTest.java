@@ -21,7 +21,6 @@ package org.apache.pinot.core.plan.maker;
 import java.io.File;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -39,11 +38,15 @@ import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentImp
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.segment.local.upsert.ConcurrentMapPartitionUpsertMetadataManager;
+import org.apache.pinot.segment.local.upsert.UpsertContext;
+import org.apache.pinot.segment.local.upsert.UpsertUtils;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
-import org.apache.pinot.spi.config.table.HashFunction;
+import org.apache.pinot.spi.config.table.IndexConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
@@ -53,7 +56,6 @@ import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.TimeGranularitySpec;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
-import org.mockito.Mockito;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.AfterTest;
 import org.testng.annotations.BeforeClass;
@@ -61,6 +63,7 @@ import org.testng.annotations.BeforeTest;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import static org.mockito.Mockito.mock;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
@@ -113,8 +116,8 @@ public class MetadataAndDictionaryAggregationPlanMakerTest {
     segmentGeneratorConfig.setTableName("testTable");
     segmentGeneratorConfig.setSegmentName(SEGMENT_NAME);
     segmentGeneratorConfig.setOutDir(INDEX_DIR.getAbsolutePath());
-    segmentGeneratorConfig.setInvertedIndexCreationColumns(
-        Arrays.asList("column6", "column7", "column11", "column17", "column18"));
+    segmentGeneratorConfig.setIndexOn(StandardIndexes.inverted(), IndexConfig.ENABLED, "column6", "column7", "column11",
+        "column17", "column18");
 
     // Build the index segment.
     SegmentIndexCreationDriver driver = new SegmentIndexCreationDriverImpl();
@@ -125,17 +128,24 @@ public class MetadataAndDictionaryAggregationPlanMakerTest {
   @BeforeClass
   public void loadSegment()
       throws Exception {
+    ServerMetrics.register(mock(ServerMetrics.class));
     _indexSegment = ImmutableSegmentLoader.load(new File(INDEX_DIR, SEGMENT_NAME), ReadMode.heap);
-    ServerMetrics serverMetrics = Mockito.mock(ServerMetrics.class);
     _upsertIndexSegment = ImmutableSegmentLoader.load(new File(INDEX_DIR, SEGMENT_NAME), ReadMode.heap);
-    ((ImmutableSegmentImpl) _upsertIndexSegment).enableUpsert(
-        new ConcurrentMapPartitionUpsertMetadataManager("testTable_REALTIME", 0, Collections.singletonList("column6"),
-            "daysSinceEpoch", HashFunction.NONE, null, false, serverMetrics), new ThreadSafeMutableRoaringBitmap());
+    UpsertContext upsertContext =
+        new UpsertContext.Builder().setTableConfig(mock(TableConfig.class)).setSchema(mock(Schema.class))
+            .setPrimaryKeyColumns(Collections.singletonList("column6"))
+            .setComparisonColumns(Collections.singletonList("daysSinceEpoch")).setTableIndexDir(INDEX_DIR).build();
+    ConcurrentMapPartitionUpsertMetadataManager upsertMetadataManager =
+        new ConcurrentMapPartitionUpsertMetadataManager("testTable_REALTIME", 0, upsertContext);
+    ((ImmutableSegmentImpl) _upsertIndexSegment).enableUpsert(upsertMetadataManager,
+        new ThreadSafeMutableRoaringBitmap(), null);
   }
 
   @AfterClass
   public void destroySegment() {
     _indexSegment.destroy();
+    _upsertIndexSegment.offload();
+    _upsertIndexSegment.destroy();
   }
 
   @AfterTest
@@ -147,9 +157,12 @@ public class MetadataAndDictionaryAggregationPlanMakerTest {
   public void testPlanMaker(String query, Class<? extends Operator<?>> operatorClass,
       Class<? extends Operator<?>> upsertOperatorClass) {
     QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
-    Operator<?> operator = PLAN_MAKER.makeSegmentPlanNode(_indexSegment, queryContext).run();
+    Operator<?> operator = PLAN_MAKER.makeSegmentPlanNode(new SegmentContext(_indexSegment), queryContext).run();
     assertTrue(operatorClass.isInstance(operator));
-    Operator<?> upsertOperator = PLAN_MAKER.makeSegmentPlanNode(_upsertIndexSegment, queryContext).run();
+
+    SegmentContext segmentContext = new SegmentContext(_upsertIndexSegment);
+    segmentContext.setQueryableDocIdsSnapshot(UpsertUtils.getQueryableDocIdsSnapshotFromSegment(_upsertIndexSegment));
+    Operator<?> upsertOperator = PLAN_MAKER.makeSegmentPlanNode(segmentContext, queryContext).run();
     assertTrue(upsertOperatorClass.isInstance(upsertOperator));
   }
 

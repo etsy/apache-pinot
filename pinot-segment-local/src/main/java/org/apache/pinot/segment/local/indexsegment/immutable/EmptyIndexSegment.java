@@ -26,6 +26,8 @@ import org.apache.pinot.segment.local.segment.index.datasource.EmptyDataSource;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.datasource.DataSource;
+import org.apache.pinot.segment.spi.index.IndexReader;
+import org.apache.pinot.segment.spi.index.IndexType;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
@@ -75,6 +77,10 @@ public class EmptyIndexSegment implements ImmutableSegment {
   }
 
   @Override
+  public void offload() {
+  }
+
+  @Override
   public void destroy() {
   }
 
@@ -89,6 +95,12 @@ public class EmptyIndexSegment implements ImmutableSegment {
     return null;
   }
 
+  @Nullable
+  @Override
+  public ThreadSafeMutableRoaringBitmap getQueryableDocIds() {
+    return null;
+  }
+
   @Override
   public GenericRow getRecord(int docId, GenericRow reuse) {
     throw new UnsupportedOperationException("Cannot read record from empty segment");
@@ -97,6 +109,11 @@ public class EmptyIndexSegment implements ImmutableSegment {
   @Override
   public Object getValue(int docId, String column) {
     throw new UnsupportedOperationException("Cannot read value from empty segment");
+  }
+
+  @Override
+  public <I extends IndexReader> I getIndex(String column, IndexType<?, I, ?> type) {
+    return null;
   }
 
   @Override

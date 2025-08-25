@@ -21,16 +21,17 @@ package org.apache.pinot.compat;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.google.common.base.Function;
 import java.io.File;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
-import javax.annotation.Nullable;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.commons.io.FileUtils;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -57,7 +58,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-
 
 /**
  * PRODUCE
@@ -167,9 +167,8 @@ public class StreamOp extends BaseOp {
       int partitions = Integer.parseInt(streamConfigMap.getProperty(NUM_PARTITIONS));
 
       final Map<String, Object> config = new HashMap<>();
-      config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
-          ClusterDescriptor.getInstance().getDefaultHost() + ":" + ClusterDescriptor.getInstance().getKafkaPort());
-      config.put(AdminClientConfig.CLIENT_ID_CONFIG, "Kafka2AdminClient-" + UUID.randomUUID().toString());
+      config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, ClusterDescriptor.getInstance().getKafkaServerUrl());
+      config.put(AdminClientConfig.CLIENT_ID_CONFIG, "Kafka2AdminClient-" + UUID.randomUUID());
       config.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 15000);
       AdminClient adminClient = KafkaAdminClient.create(config);
       NewTopic topic = new NewTopic(topicName, partitions, KAFKA_REPLICATION_FACTOR);
@@ -226,7 +225,8 @@ public class StreamOp extends BaseOp {
           .sendGetRequest(ControllerRequestURLBuilder.baseUrl(ClusterDescriptor.getInstance().getControllerUrl())
               .forSchemaGet(schemaName));
       Schema schema = JsonUtils.stringToObject(schemaString, Schema.class);
-      DateTimeFormatSpec dateTimeFormatSpec = schema.getSpecForTimeColumn(timeColumn).getFormatSpec();
+      DateTimeFormatSpec dateTimeFormatSpec = Objects.requireNonNull(
+          schema.getSpecForTimeColumn(timeColumn)).getFormatSpec();
 
       try (RecordReader csvRecordReader = RecordReaderFactory
           .getRecordReader(FileFormat.CSV, localReplacedCSVFile, columnNames, recordReaderConfig)) {
@@ -279,8 +279,10 @@ public class StreamOp extends BaseOp {
       String errorMsg =
           String.format("Failed when running query: '%s'; got exceptions:\n%s\n", query, response.toPrettyString());
       JsonNode exceptions = response.get(EXCEPTIONS);
-      if (String.valueOf(QueryException.BROKER_INSTANCE_MISSING_ERROR).equals(exceptions.get(ERROR_CODE).toString())) {
-        LOGGER.warn(errorMsg + ".Trying again");
+      JsonNode errorCode = exceptions.get(ERROR_CODE);
+      if (String.valueOf(QueryException.BROKER_INSTANCE_MISSING_ERROR).equals(String.valueOf(errorCode))
+          && errorCode != null) {
+        LOGGER.warn("{}.Trying again", errorMsg);
         return 0;
       }
       LOGGER.error(errorMsg);
@@ -304,16 +306,14 @@ public class StreamOp extends BaseOp {
 
   private void waitForDocsLoaded(String tableName, long targetDocs, long timeoutMs) {
     LOGGER.info("Wait Doc to load ...");
-    TestUtils.waitForCondition(new Function<Void, Boolean>() {
-      @Nullable
-      @Override
-      public Boolean apply(@Nullable Void aVoid) {
-        try {
-          return fetchExistingTotalDocs(tableName) == targetDocs;
-        } catch (Exception e) {
-          return null;
-        }
-      }
-    }, 100L, timeoutMs, "Failed to load " + targetDocs + " documents", true);
+    AtomicLong loadedDocs = new AtomicLong(-1);
+    TestUtils.waitForCondition(
+        () -> {
+          long existingTotalDocs = fetchExistingTotalDocs(tableName);
+          loadedDocs.set(existingTotalDocs);
+          return existingTotalDocs == targetDocs;
+        }, 100L, timeoutMs,
+        "Failed to load " + targetDocs + " documents. Found " + loadedDocs.get() + " instead", true,
+        Duration.ofSeconds(1));
   }
 }

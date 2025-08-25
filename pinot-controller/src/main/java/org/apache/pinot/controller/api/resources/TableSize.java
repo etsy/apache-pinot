@@ -29,30 +29,40 @@ import io.swagger.annotations.SecurityDefinition;
 import io.swagger.annotations.SwaggerDefinition;
 import java.util.concurrent.Executor;
 import javax.inject.Inject;
-import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import org.apache.commons.httpclient.HttpConnectionManager;
+import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.pinot.common.metrics.ControllerMetrics;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.controller.ControllerConf;
+import org.apache.pinot.controller.LeadControllerManager;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.util.TableSizeReader;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class TableSize {
   private static final Logger LOGGER = LoggerFactory.getLogger(TableSize.class);
@@ -64,28 +74,31 @@ public class TableSize {
   @Inject
   Executor _executor;
   @Inject
-  HttpConnectionManager _connectionManager;
+  HttpClientConnectionManager _connectionManager;
 
   @Inject
   ControllerMetrics _controllerMetrics;
 
+  @Inject
+  LeadControllerManager _leadControllerManager;
+
   @GET
   @Path("/tables/{tableName}/size")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.GET_SIZE)
   @Produces(MediaType.APPLICATION_JSON)
-  @ApiOperation(value = "Read table sizes",
-      notes = "Get table size details. Table size is the size of untarred segments including replication")
+  @ApiOperation(value = "Read table sizes", notes = "Get table size details. Table size is the size of untarred "
+      + "segments including replication")
   @ApiResponses(value = {
-      @ApiResponse(code = 200, message = "Success"),
-      @ApiResponse(code = 404, message = "Table not found"),
+      @ApiResponse(code = 200, message = "Success"), @ApiResponse(code = 404, message = "Table not found"),
       @ApiResponse(code = 500, message = "Internal server error")
   })
   public TableSizeReader.TableSizeDetails getTableSize(
       @ApiParam(value = "Table name without type", required = true, example = "myTable | myTable_OFFLINE")
-      @PathParam("tableName") String tableName,
-      @ApiParam(value = "Get detailed information", required = false) @DefaultValue("true") @QueryParam("detailed")
-          boolean detailed) {
+      @PathParam("tableName") String tableName, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     TableSizeReader tableSizeReader =
-        new TableSizeReader(_executor, _connectionManager, _controllerMetrics, _pinotHelixResourceManager);
+        new TableSizeReader(_executor, _connectionManager, _controllerMetrics, _pinotHelixResourceManager,
+            _leadControllerManager);
     TableSizeReader.TableSizeDetails tableSizeDetails = null;
     try {
       tableSizeDetails =

@@ -20,10 +20,10 @@
 
 import React, { useEffect, useState } from 'react';
 import { makeStyles } from '@material-ui/core/styles';
-import { Grid, Checkbox, Button, FormControl, Input, InputLabel } from '@material-ui/core';
+import { Grid, Checkbox, Button, FormControl, Input, InputLabel, Box, Typography } from '@material-ui/core';
 import Alert from '@material-ui/lab/Alert';
 import FileCopyIcon from '@material-ui/icons/FileCopy';
-import { TableData } from 'Models';
+import { SqlException, TableData } from 'Models';
 import { UnControlled as CodeMirror } from 'react-codemirror2';
 import 'codemirror/lib/codemirror.css';
 import 'codemirror/theme/material.css';
@@ -47,6 +47,7 @@ import PinotMethodUtils from '../utils/PinotMethodUtils';
 import '../styles/styles.css';
 import {Resizable} from "re-resizable";
 import { useHistory, useLocation } from 'react-router';
+import sqlFormatter from '@sqltools/formatter';
 
 const useStyles = makeStyles((theme) => ({
   title: {
@@ -78,7 +79,15 @@ const useStyles = makeStyles((theme) => ({
   },
   runNowBtn: {
     marginLeft: 'auto',
-    paddingLeft: '74px',
+    paddingLeft: '10px',
+  },
+  formatSQLBtn: {
+    marginLeft: 'auto',
+    paddingLeft: '30px',
+  },
+  formatMSE: {
+    marginLeft: '-30px',
+    paddingLeft: 'auto',
   },
   sqlDiv: {
     height: '100%',
@@ -88,7 +97,8 @@ const useStyles = makeStyles((theme) => ({
     paddingBottom: '48px',
   },
   sqlError: {
-    whiteSpace: 'pre-wrap',
+    whiteSpace: 'pre',
+    overflow: "auto"
   },
   timeoutControl: {
     bottom: 10
@@ -165,6 +175,7 @@ const QueryPage = () => {
     columns: [],
     records: [],
   });
+  const [showException, setShowException] = useState<boolean>(false);
 
   const [tableSchema, setTableSchema] = useState<TableData>({
     columns: [],
@@ -183,7 +194,7 @@ const QueryPage = () => {
 
   const [outputResult, setOutputResult] = useState('');
 
-  const [resultError, setResultError] = useState('');
+  const [resultError, setResultError] = useState<SqlException[]>([]);
 
   const [queryStats, setQueryStats] = useState<TableData>({
     columns: [],
@@ -212,12 +223,14 @@ const QueryPage = () => {
   };
 
   const handleQueryInterfaceKeyDown = (editor, event) => {
-    // Map Cmd + Enter KeyPress to executing the query
-    if (event.metaKey == true && event.keyCode == 13) {
+    const modifiedEnabled = event.metaKey == true || event.ctrlKey == true;
+
+    // Map (Cmd/Ctrl) + Enter KeyPress to executing the query
+    if (modifiedEnabled && event.keyCode == 13) {
       handleRunNow(editor.getValue());
     }
-    // Map Cmd + / KeyPress to toggle commenting the query
-    if (event.metaKey == true && event.keyCode == 191) {
+    // Map (Cmd/Ctrl) + / KeyPress to toggle commenting the query
+    if (modifiedEnabled && event.keyCode == 191) {
       handleComment(editor);
     }
   }
@@ -267,22 +280,27 @@ const QueryPage = () => {
     setInputQuery(querySplit.join("\n"));
   }
 
+  const handleFormatSQL = (query?: string) => {
+    const formatted = sqlFormatter.format(query);
+    setInputQuery(formatted);
+  };
+
   const handleRunNow = async (query?: string) => {
     setQueryLoader(true);
     queryExecuted.current = true;
     let params;
-    let queryOptions = '';
+    let queryOptions = [];
     if(queryTimeout){
-      queryOptions += `timeoutMs=${queryTimeout}`;
+      queryOptions.push(`timeoutMs=${queryTimeout}`);
     }
     if(checked.useMSE){
-      queryOptions += `useMultistageEngine=true`;
+      queryOptions.push(`useMultistageEngine=true`);
     }
     const finalQuery = `${query || inputQuery.trim()}`;
     params = JSON.stringify({
       sql: `${finalQuery}`,
       trace: checked.tracing,
-      queryOptions: `${queryOptions}`,
+      queryOptions: `${queryOptions.join(";")}`,
     });
 
     if(finalQuery !== ''){
@@ -299,7 +317,7 @@ const QueryPage = () => {
     }
 
     const results = await PinotMethodUtils.getQueryResults(params);
-    setResultError(results.error || '');
+    setResultError(results.exceptions || []);
     setResultData(results.result || { columns: [], records: [] });
     setQueryStats(results.queryStats || { columns: responseStatCols, records: [] });
     setOutputResult(JSON.stringify(results.data, null, 2) || '');
@@ -315,10 +333,6 @@ const QueryPage = () => {
       warnings.push(`There are ${numSegmentsPrunedInvalid} invalid segment/s. This usually means that they were `
          + `created with an older schema. `
          + `Please reload the table in order to refresh these segments to the new schema.`);
-    }
-    if (checked.useMSE) {
-      warnings.push(`Using V2 Multi-Stage Query Engine. This is an experimental feature. Please report any bugs to `
-          + `Apache Pinot Slack channel.`);
     }
     return warnings;
   }
@@ -503,28 +517,38 @@ const QueryPage = () => {
                 Tracing
               </Grid>
 
-              <Grid item xs={2}>
+              <Grid item xs={3} className={classes.formatMSE}>
                 <Checkbox
                     name="useMSE"
                     color="primary"
                     onChange={handleChange}
                     checked={checked.useMSE}
                 />
-                Use V2 Engine
+                Use Multi-Stage Engine
               </Grid>
 
               <Grid item xs={3}>
                 <FormControl fullWidth={true} className={classes.timeoutControl}>
-                  <InputLabel htmlFor="my-input">Timeout (in Milliseconds)</InputLabel>
+                  <InputLabel htmlFor="my-input">Timeout (Milliseconds)</InputLabel>
                   <Input id="my-input" type="number" value={queryTimeout} onChange={(e)=> setQueryTimeout(Number(e.target.value) || '')}/>
                 </FormControl>
               </Grid>
 
-              <Grid item xs={3} className={classes.runNowBtn}>
+              <Grid item xs={2} className={classes.formatSQLBtn}>
                 <Button
-                  variant="contained"
-                  color="primary"
-                  onClick={() => handleRunNow()}
+                    variant="contained"
+                    color="primary"
+                    onClick={() => handleFormatSQL(inputQuery)}
+                >
+                  Format SQL
+                </Button>
+              </Grid>
+
+              <Grid item xs={2} className={classes.runNowBtn}>
+                <Button
+                    variant="contained"
+                    color="primary"
+                    onClick={() => handleRunNow()}
                 >
                   Run Query
                 </Button>
@@ -553,93 +577,122 @@ const QueryPage = () => {
                                    </Alert>
                   )
                 }
+        
+                {/* Sql result errors */}
+                {resultError && resultError.length > 0 && (
+                    <>
+                      <Alert 
+                        className={classes.sqlError} 
+                        severity="error" 
+                        action={
+                          <FormControlLabel
+                            control={<Switch color="primary" checked={showException} onChange={(e) => setShowException(e.target.checked)} name="checkedA" />}
+                            label={<Typography variant='body2'>Show Exceptions</Typography>}
+                          />
+                        }
+                      >
+                        {
+                          resultData.columns.length > 0 ? (
+                            <Typography variant='body2'>Partial results due to exceptions. Please toggle the switch to view details.</Typography>
+                          ) : (
+                            <Typography variant='body2'>Query failed with exceptions. Please toggle the switch to view details.</Typography>
+                          )
+                        }
+                      </Alert>
+                      <Box m={"16px"}></Box>
 
-                {resultError ? (
-                  <Alert severity="error" className={classes.sqlError}>
-                    {resultError}
-                  </Alert>
-                ) : (
-                  <>
-                    <Grid item xs style={{ backgroundColor: 'white' }}>
-                      {resultData.columns.length ? (
-                        <>
-                          <Grid container className={classes.actionBtns}>
-                            <Button
-                              variant="contained"
-                              color="primary"
-                              size="small"
-                              className={classes.btn}
-                              onClick={() => downloadData('xls')}
-                            >
-                              Excel
-                            </Button>
-                            <Button
-                              variant="contained"
-                              color="primary"
-                              size="small"
-                              className={classes.btn}
-                              onClick={() => downloadData('csv')}
-                            >
-                              CSV
-                            </Button>
-                            <Button
-                              variant="contained"
-                              color="primary"
-                              size="small"
-                              className={classes.btn}
-                              onClick={() => copyToClipboard()}
-                            >
-                              Copy
-                            </Button>
-                            {copyMsg ? (
-                              <Alert
-                                icon={<FileCopyIcon fontSize="inherit" />}
-                                severity="info"
-                              >
-                                Copied {resultData.records.length} rows to
-                                Clipboard
-                              </Alert>
-                            ) : null}
+                      {
+                        showException && resultError.map((error) => (
+                          <Box style={{paddingBottom: "10px"}}>
+                            <Alert className={classes.sqlError} severity="error">
+                              {error.errorCode && <Typography variant="body2">Error Code: {error.errorCode}</Typography>}
+                              {error.message}
+                            </Alert>
+                          </Box>
+                        ))
+                      }
+                    </>
+                  )
+                }
+        
+                <Grid item xs style={{ backgroundColor: 'white' }}>
+                  {resultData.columns.length ? (
+                    <>
+                      <Grid container className={classes.actionBtns}>
+                        <Button
+                          variant="contained"
+                          color="primary"
+                          size="small"
+                          className={classes.btn}
+                          onClick={() => downloadData('xls')}
+                        >
+                          Excel
+                        </Button>
+                        <Button
+                          variant="contained"
+                          color="primary"
+                          size="small"
+                          className={classes.btn}
+                          onClick={() => downloadData('csv')}
+                        >
+                          CSV
+                        </Button>
+                        <Button
+                          variant="contained"
+                          color="primary"
+                          size="small"
+                          className={classes.btn}
+                          onClick={() => copyToClipboard()}
+                        >
+                          Copy
+                        </Button>
+                        {copyMsg ? (
+                          <Alert
+                            icon={<FileCopyIcon fontSize="inherit" />}
+                            severity="info"
+                          >
+                            Copied {resultData.records.length} rows to
+                            Clipboard
+                          </Alert>
+                        ) : null}
 
-                            <FormControlLabel
-                              control={
-                                <Switch
-                                  checked={checked.showResultJSON}
-                                  onChange={handleChange}
-                                  name="showResultJSON"
-                                  color="primary"
-                                />
-                              }
-                              label="Show JSON format"
-                              className={classes.runNowBtn}
+                        <FormControlLabel
+                          control={
+                            <Switch
+                              checked={checked.showResultJSON}
+                              onChange={handleChange}
+                              name="showResultJSON"
+                              color="primary"
                             />
-                          </Grid>
-                          {!checked.showResultJSON ? (
-                            <CustomizedTables
-                              title="Query Result"
-                              data={resultData}
-                              isSticky={true}
-                              showSearchBox={true}
-                              inAccordionFormat={true}
-                            />
-                          ) : resultData.columns.length ? (
-                            <SimpleAccordion
-                              headerTitle="Query Result (JSON Format)"
-                              showSearchBox={false}
-                            >
-                              <CodeMirror
-                                options={jsonoptions}
-                                value={outputResult}
-                                className={classes.queryOutput}
-                                autoCursor={false}
-                              />
-                            </SimpleAccordion>
-                          ) : null}
-                        </>
+                          }
+                          label="Show JSON format"
+                          className={classes.runNowBtn}
+                        />
+                      </Grid>
+                      {!checked.showResultJSON ? (
+                        <CustomizedTables
+                          title="Query Result"
+                          data={resultData}
+                          isSticky={true}
+                          showSearchBox={true}
+                          inAccordionFormat={true}
+                        />
+                      ) : resultData.columns.length ? (
+                        <SimpleAccordion
+                          headerTitle="Query Result (JSON Format)"
+                          showSearchBox={false}
+                        >
+                          <CodeMirror
+                            options={jsonoptions}
+                            value={outputResult}
+                            className={classes.queryOutput}
+                            autoCursor={false}
+                          />
+                        </SimpleAccordion>
                       ) : null}
-                    </Grid>
-                  </>
-                )}
+                    </>
+                  ) : null}
+                </Grid>
               </>
             )}
           </Grid>

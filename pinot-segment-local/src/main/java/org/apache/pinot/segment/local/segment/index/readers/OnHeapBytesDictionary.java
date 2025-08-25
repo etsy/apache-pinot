@@ -21,12 +21,14 @@ package org.apache.pinot.segment.local.segment.index.readers;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import java.math.BigDecimal;
 import java.util.Arrays;
+import javax.annotation.Nullable;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.BigDecimalUtils;
 import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.spi.utils.BytesUtils;
+import org.apache.pinot.spi.utils.FALFInterner;
 
 
 /**
@@ -41,15 +43,16 @@ public class OnHeapBytesDictionary extends BaseImmutableDictionary {
   private final Object2IntOpenHashMap<ByteArray> _valToDictId;
   private final ByteArray[] _dictIdToVal;
 
-  public OnHeapBytesDictionary(PinotDataBuffer dataBuffer, int length, int numBytesPerValue) {
-    super(dataBuffer, length, numBytesPerValue, (byte) 0);
+  public OnHeapBytesDictionary(PinotDataBuffer dataBuffer, int length, int numBytesPerValue,
+      @Nullable FALFInterner<byte[]> byteInterner) {
+    super(dataBuffer, length, numBytesPerValue);
 
     _valToDictId = new Object2IntOpenHashMap<>(length);
     _valToDictId.defaultReturnValue(Dictionary.NULL_VALUE_INDEX);
     _dictIdToVal = new ByteArray[length];
 
     for (int dictId = 0; dictId < length; dictId++) {
-      ByteArray value = new ByteArray(getBytes(dictId));
+      ByteArray value = new ByteArray(getBytes(dictId), byteInterner);
       _dictIdToVal[dictId] = value;
       _valToDictId.put(value, dictId);
     }

@@ -19,7 +19,7 @@
 package org.apache.pinot.core.geospatial.transform.function;
 
 import com.google.common.base.Preconditions;
-import org.apache.pinot.core.operator.blocks.ProjectionBlock;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
 import org.apache.pinot.segment.local.utils.GeometryUtils;
 import org.locationtech.jts.geom.Geometry;
@@ -49,8 +49,8 @@ public class StDistanceFunction extends BaseBinaryGeoTransformFunction {
   }
 
   @Override
-  public double[] transformToDoubleValuesSV(ProjectionBlock projectionBlock) {
-    return transformGeometryToDoubleValuesSV(projectionBlock);
+  public double[] transformToDoubleValuesSV(ValueBlock valueBlock) {
+    return transformGeometryToDoubleValuesSV(valueBlock);
   }
 
   @Override
@@ -75,7 +75,7 @@ public class StDistanceFunction extends BaseBinaryGeoTransformFunction {
         "Longitude must be between -180 and 180");
   }
 
-  private static double sphericalDistance(Geometry leftGeometry, Geometry rightGeometry) {
+  public static double sphericalDistance(Geometry leftGeometry, Geometry rightGeometry) {
     Preconditions.checkArgument(leftGeometry instanceof Point, "The left argument must be a point");
     Preconditions.checkArgument(rightGeometry instanceof Point, "The right argument must be a point");
     Point leftPoint = (Point) leftGeometry;

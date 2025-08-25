@@ -46,17 +46,13 @@ public class ControllerServiceDiscoveryIntegrationTest extends BaseClusterIntegr
   }
 
   @Override
-  public Map<String, Object> getDefaultControllerConfiguration() {
-    Map<String, Object> retVal = super.getDefaultControllerConfiguration();
-    retVal.put(CommonConstants.Controller.CONTROLLER_SERVICE_AUTO_DISCOVERY, true);
-    return retVal;
+  protected void overrideControllerConf(Map<String, Object> properties) {
+    properties.put(CommonConstants.Controller.CONTROLLER_SERVICE_AUTO_DISCOVERY, true);
   }
 
   @Override
-  protected PinotConfiguration getDefaultBrokerConfiguration() {
-    PinotConfiguration config = new PinotConfiguration();
-    config.setProperty(CommonConstants.Broker.BROKER_SERVICE_AUTO_DISCOVERY, true);
-    return config;
+  protected void overrideBrokerConf(PinotConfiguration brokerConf) {
+    brokerConf.setProperty(CommonConstants.Broker.BROKER_SERVICE_AUTO_DISCOVERY, true);
   }
 
   @BeforeClass
@@ -67,14 +63,14 @@ public class ControllerServiceDiscoveryIntegrationTest extends BaseClusterIntegr
     // Start the Pinot cluster
     startZk();
     startController();
-    startBrokers(1);
-    startServers(1);
+    startBroker();
+    startServer();
   }
+
   @AfterClass
   public void tearDown()
-          throws Exception {
-
-    // Brokers and servers has been stopped
+      throws Exception {
+    stopServer();
     stopBroker();
     stopController();
     stopZk();
@@ -84,9 +80,9 @@ public class ControllerServiceDiscoveryIntegrationTest extends BaseClusterIntegr
   @Test
   public void testControllerExtraEndpointsAutoLoaded()
       throws Exception {
-    String response = sendGetRequest(_controllerBaseApiUrl + "/test/echo/doge");
+    String response = sendGetRequest(getControllerBaseApiUrl() + "/test/echo/doge");
     Assert.assertEquals(response, "doge");
-    response = sendGetRequest(_brokerBaseApiUrl + "/test/echo/doge");
+    response = sendGetRequest(getBrokerBaseApiUrl() + "/test/echo/doge");
     Assert.assertEquals(response, "doge");
   }
 }

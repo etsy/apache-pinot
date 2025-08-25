@@ -21,7 +21,7 @@ package org.apache.pinot.core.query.aggregation.function;
 
 import java.util.Map;
 import org.apache.pinot.common.request.context.ExpressionContext;
-import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.IntAggregateResultHolder;
@@ -232,18 +232,23 @@ public abstract class BaseBooleanAggregationFunction extends BaseSingleInputAggr
   }
 
   @Override
-  public DataSchema.ColumnDataType getIntermediateResultColumnType() {
-    return DataSchema.ColumnDataType.BOOLEAN;
+  public ColumnDataType getIntermediateResultColumnType() {
+    return ColumnDataType.INT;
   }
 
   @Override
-  public DataSchema.ColumnDataType getFinalResultColumnType() {
-    return DataSchema.ColumnDataType.BOOLEAN;
+  public ColumnDataType getFinalResultColumnType() {
+    return ColumnDataType.BOOLEAN;
   }
 
   @Override
   public Integer extractFinalResult(Integer intermediateResult) {
     return intermediateResult;
+  }
+
+  @Override
+  public Integer mergeFinalResult(Integer finalResult1, Integer finalResult2) {
+    return merge(finalResult1, finalResult2);
   }
 
   private int getInt(Integer val) {

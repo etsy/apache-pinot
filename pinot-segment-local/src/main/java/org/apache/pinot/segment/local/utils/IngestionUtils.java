@@ -65,6 +65,7 @@ import org.apache.pinot.spi.ingestion.batch.spec.PinotClusterSpec;
 import org.apache.pinot.spi.ingestion.batch.spec.PushJobSpec;
 import org.apache.pinot.spi.ingestion.batch.spec.SegmentGenerationJobSpec;
 import org.apache.pinot.spi.ingestion.batch.spec.TableSpec;
+import org.apache.pinot.spi.recordenricher.RecordEnricherPipeline;
 import org.apache.pinot.spi.utils.IngestionConfigUtils;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.spi.utils.retry.AttemptsExceededException;
@@ -167,7 +168,7 @@ public final class IngestionUtils {
 
       case BatchConfigProperties.SegmentNameGeneratorType.SIMPLE:
         return new SimpleSegmentNameGenerator(rawTableName, batchConfig.getSegmentNamePostfix(),
-            batchConfig.isAppendUUIDToSegmentName());
+            batchConfig.isAppendUUIDToSegmentName(), batchConfig.isExcludeTimeInSegmentName());
       default:
         throw new IllegalStateException(String
             .format("Unsupported segmentNameGeneratorType: %s for table: %s", segmentNameGeneratorType,
@@ -308,6 +309,14 @@ public final class IngestionUtils {
    */
   public static Set<String> getFieldsForRecordExtractor(@Nullable IngestionConfig ingestionConfig, Schema schema) {
     Set<String> fieldsForRecordExtractor = new HashSet<>();
+
+    if (null != ingestionConfig && (null != ingestionConfig.getSchemaConformingTransformerConfig()
+        || null != ingestionConfig.getSchemaConformingTransformerV2Config())) {
+      // The SchemaConformingTransformer requires that all fields are extracted, indicated by returning an empty set
+      // here. Compared to extracting the fields specified below, extracting all fields should be a superset.
+      return fieldsForRecordExtractor;
+    }
+
     extractFieldsFromIngestionConfig(ingestionConfig, fieldsForRecordExtractor);
     extractFieldsFromSchema(schema, fieldsForRecordExtractor);
     fieldsForRecordExtractor = getFieldsToReadWithComplexType(fieldsForRecordExtractor, ingestionConfig);
@@ -328,7 +337,7 @@ public final class IngestionUtils {
     String delimiter = complexTypeConfig.getDelimiter() == null ? ComplexTypeTransformer.DEFAULT_DELIMITER
         : complexTypeConfig.getDelimiter();
     for (String field : fieldsToRead) {
-      result.add(StringUtils.split(field, delimiter)[0]);
+      result.add(StringUtils.splitByWholeSeparator(field, delimiter)[0]);
     }
     return result;
   }
@@ -372,15 +381,16 @@ public final class IngestionUtils {
           expressionContext.getColumns(fields);
         }
       }
+
+      fields.addAll(RecordEnricherPipeline.fromIngestionConfig(ingestionConfig).getColumnsToExtract());
       List<TransformConfig> transformConfigs = ingestionConfig.getTransformConfigs();
       if (transformConfigs != null) {
         for (TransformConfig transformConfig : transformConfigs) {
           FunctionEvaluator expressionEvaluator =
               FunctionEvaluatorFactory.getExpressionEvaluator(transformConfig.getTransformFunction());
           fields.addAll(expressionEvaluator.getArguments());
-          fields.add(transformConfig
-              .getColumnName()); // add the column itself too, so that if it is already transformed, we won't
-          // transform again
+          // add the column itself too, so that if it is already transformed, we won't transform again
+          fields.add(transformConfig.getColumnName());
         }
       }
       ComplexTypeConfig complexTypeConfig = ingestionConfig.getComplexTypeConfig();

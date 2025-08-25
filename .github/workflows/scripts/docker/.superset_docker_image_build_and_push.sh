@@ -49,7 +49,7 @@ done
 
 cd ${DOCKER_FILE_BASE_DIR}
 
-docker buildx build \
+docker build \
     --no-cache \
     --platform=${BUILD_PLATFORM} \
     --file Dockerfile \

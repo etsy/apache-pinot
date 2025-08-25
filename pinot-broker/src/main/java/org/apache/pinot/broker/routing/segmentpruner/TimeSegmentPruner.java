@@ -29,22 +29,19 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.helix.AccessOption;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
-import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.broker.routing.segmentpruner.interval.Interval;
 import org.apache.pinot.broker.routing.segmentpruner.interval.IntervalTree;
-import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.Function;
 import org.apache.pinot.common.request.Identifier;
+import org.apache.pinot.common.request.Literal;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.DateTimeFieldSpec;
 import org.apache.pinot.spi.data.DateTimeFormatSpec;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Query.Range;
 import org.apache.pinot.sql.FilterKind;
@@ -64,44 +61,25 @@ public class TimeSegmentPruner implements SegmentPruner {
   private static final Interval DEFAULT_INTERVAL = new Interval(MIN_START_TIME, MAX_END_TIME);
 
   private final String _tableNameWithType;
-  private final ZkHelixPropertyStore<ZNRecord> _propertyStore;
-  private final String _segmentZKMetadataPathPrefix;
   private final String _timeColumn;
   private final DateTimeFormatSpec _timeFormatSpec;
 
   private volatile IntervalTree<String> _intervalTree;
   private final Map<String, Interval> _intervalMap = new HashMap<>();
 
-  public TimeSegmentPruner(TableConfig tableConfig, ZkHelixPropertyStore<ZNRecord> propertyStore) {
+  public TimeSegmentPruner(TableConfig tableConfig, DateTimeFieldSpec timeFieldSpec) {
     _tableNameWithType = tableConfig.getTableName();
-    _propertyStore = propertyStore;
-    _segmentZKMetadataPathPrefix = ZKMetadataProvider.constructPropertyStorePathForResource(_tableNameWithType) + "/";
-    _timeColumn = tableConfig.getValidationConfig().getTimeColumnName();
-    Preconditions.checkNotNull(_timeColumn, "Time column must be configured in table config for table: %s",
-        _tableNameWithType);
-
-    Schema schema = ZKMetadataProvider.getTableSchema(_propertyStore, _tableNameWithType);
-    Preconditions.checkNotNull(schema, "Failed to find schema for table: %s", _tableNameWithType);
-    DateTimeFieldSpec dateTimeSpec = schema.getSpecForTimeColumn(_timeColumn);
-    Preconditions.checkNotNull(dateTimeSpec, "Field spec must be specified in schema for time column: %s of table: %s",
-        _timeColumn, _tableNameWithType);
-    _timeFormatSpec = dateTimeSpec.getFormatSpec();
+    _timeColumn = timeFieldSpec.getName();
+    _timeFormatSpec = timeFieldSpec.getFormatSpec();
   }
 
   @Override
-  public void init(IdealState idealState, ExternalView externalView, Set<String> onlineSegments) {
+  public void init(IdealState idealState, ExternalView externalView, List<String> onlineSegments,
+      List<ZNRecord> znRecords) {
     // Bulk load time info for all online segments
-    int numSegments = onlineSegments.size();
-    List<String> segments = new ArrayList<>(numSegments);
-    List<String> segmentZKMetadataPaths = new ArrayList<>(numSegments);
-    for (String segment : onlineSegments) {
-      segments.add(segment);
-      segmentZKMetadataPaths.add(_segmentZKMetadataPathPrefix + segment);
-    }
-    List<ZNRecord> znRecords = _propertyStore.get(segmentZKMetadataPaths, null, AccessOption.PERSISTENT, false);
-    for (int i = 0; i < numSegments; i++) {
-      String segment = segments.get(i);
-      Interval interval = extractIntervalFromSegmentZKMetaZNRecord(segment, znRecords.get(i));
+    for (int idx = 0; idx < onlineSegments.size(); idx++) {
+      String segment = onlineSegments.get(idx);
+      Interval interval = extractIntervalFromSegmentZKMetaZNRecord(segment, znRecords.get(idx));
       _intervalMap.put(segment, interval);
     }
     _intervalTree = new IntervalTree<>(_intervalMap);
@@ -128,21 +106,21 @@ public class TimeSegmentPruner implements SegmentPruner {
 
   @Override
   public synchronized void onAssignmentChange(IdealState idealState, ExternalView externalView,
-      Set<String> onlineSegments) {
+      Set<String> onlineSegments, List<String> pulledSegments, List<ZNRecord> znRecords) {
     // NOTE: We don't update all the segment ZK metadata for every external view change, but only the new added/removed
     //       ones. The refreshed segment ZK metadata change won't be picked up.
-    for (String segment : onlineSegments) {
-      _intervalMap.computeIfAbsent(segment, k -> extractIntervalFromSegmentZKMetaZNRecord(k,
-          _propertyStore.get(_segmentZKMetadataPathPrefix + k, null, AccessOption.PERSISTENT)));
+    for (int idx = 0; idx < pulledSegments.size(); idx++) {
+      String segment = pulledSegments.get(idx);
+      ZNRecord zNrecord = znRecords.get(idx);
+      _intervalMap.computeIfAbsent(segment, k -> extractIntervalFromSegmentZKMetaZNRecord(k, zNrecord));
     }
     _intervalMap.keySet().retainAll(onlineSegments);
     _intervalTree = new IntervalTree<>(_intervalMap);
   }
 
   @Override
-  public synchronized void refreshSegment(String segment) {
-    Interval interval = extractIntervalFromSegmentZKMetaZNRecord(segment,
-        _propertyStore.get(_segmentZKMetadataPathPrefix + segment, null, AccessOption.PERSISTENT));
+  public synchronized void refreshSegment(String segment, @Nullable ZNRecord znRecord) {
+    Interval interval = extractIntervalFromSegmentZKMetaZNRecord(segment, znRecord);
     _intervalMap.put(segment, interval);
     _intervalTree = new IntervalTree<>(_intervalMap);
   }
@@ -231,97 +209,53 @@ public class TimeSegmentPruner implements SegmentPruner {
         } else {
           return getComplementSortedIntervals(childIntervals);
         }
-      case EQUALS: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          long timeStamp = _timeFormatSpec.fromFormatToMillis(operands.get(1).getLiteral().getFieldValue().toString());
-          return Collections.singletonList(new Interval(timeStamp, timeStamp));
-        } else {
-          return null;
+      case EQUALS:
+        if (isTimeColumn(operands.get(0))) {
+          long timestamp = toMillisSinceEpoch(operands.get(1));
+          return List.of(new Interval(timestamp, timestamp));
         }
-      }
-      case IN: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
+        return null;
+      case IN:
+        if (isTimeColumn(operands.get(0))) {
           int numOperands = operands.size();
           List<Interval> intervals = new ArrayList<>(numOperands - 1);
           for (int i = 1; i < numOperands; i++) {
-            long timeStamp =
-                _timeFormatSpec.fromFormatToMillis(operands.get(i).getLiteral().getFieldValue().toString());
-            intervals.add(new Interval(timeStamp, timeStamp));
+            long timestamp = toMillisSinceEpoch(operands.get(i));
+            intervals.add(new Interval(timestamp, timestamp));
           }
           return intervals;
-        } else {
-          return null;
-        }
-      }
-      case GREATER_THAN: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          long timeStamp = _timeFormatSpec.fromFormatToMillis(operands.get(1).getLiteral().getFieldValue().toString());
-          return Collections.singletonList(new Interval(timeStamp + 1, MAX_END_TIME));
-        } else {
-          return null;
-        }
-      }
-      case GREATER_THAN_OR_EQUAL: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          long timeStamp = _timeFormatSpec.fromFormatToMillis(operands.get(1).getLiteral().getFieldValue().toString());
-          return Collections.singletonList(new Interval(timeStamp, MAX_END_TIME));
-        } else {
-          return null;
-        }
-      }
-      case LESS_THAN: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          long timeStamp = _timeFormatSpec.fromFormatToMillis(operands.get(1).getLiteral().getFieldValue().toString());
-          if (timeStamp > MIN_START_TIME) {
-            return Collections.singletonList(new Interval(MIN_START_TIME, timeStamp - 1));
-          } else {
-            return Collections.emptyList();
-          }
-        } else {
-          return null;
-        }
-      }
-      case LESS_THAN_OR_EQUAL: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          long timeStamp = _timeFormatSpec.fromFormatToMillis(operands.get(1).getLiteral().getFieldValue().toString());
-          if (timeStamp >= MIN_START_TIME) {
-            return Collections.singletonList(new Interval(MIN_START_TIME, timeStamp));
-          } else {
-            return Collections.emptyList();
-          }
-        } else {
-          return null;
-        }
-      }
-      case BETWEEN: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          long startTimestamp =
-              _timeFormatSpec.fromFormatToMillis(operands.get(1).getLiteral().getFieldValue().toString());
-          long endTimestamp =
-              _timeFormatSpec.fromFormatToMillis(operands.get(2).getLiteral().getFieldValue().toString());
-          if (endTimestamp >= startTimestamp) {
-            return Collections.singletonList(new Interval(startTimestamp, endTimestamp));
-          } else {
-            return Collections.emptyList();
-          }
-        } else {
-          return null;
-        }
-      }
-      case RANGE: {
-        Identifier identifier = operands.get(0).getIdentifier();
-        if (identifier != null && identifier.getName().equals(_timeColumn)) {
-          return parseInterval(operands.get(1).getLiteral().getFieldValue().toString());
         }
         return null;
-      }
+      case GREATER_THAN:
+        if (isTimeColumn(operands.get(0))) {
+          return getInterval(toMillisSinceEpoch(operands.get(1)) + 1, MAX_END_TIME);
+        }
+        return null;
+      case GREATER_THAN_OR_EQUAL:
+        if (isTimeColumn(operands.get(0))) {
+          return getInterval(toMillisSinceEpoch(operands.get(1)), MAX_END_TIME);
+        }
+        return null;
+      case LESS_THAN:
+        if (isTimeColumn(operands.get(0))) {
+          return getInterval(MIN_START_TIME, toMillisSinceEpoch(operands.get(1)) - 1);
+        }
+        return null;
+      case LESS_THAN_OR_EQUAL:
+        if (isTimeColumn(operands.get(0))) {
+          return getInterval(MIN_START_TIME, toMillisSinceEpoch(operands.get(1)));
+        }
+        return null;
+      case BETWEEN:
+        if (isTimeColumn(operands.get(0))) {
+          return getInterval(toMillisSinceEpoch(operands.get(1)), toMillisSinceEpoch(operands.get(2)));
+        }
+        return null;
+      case RANGE:
+        if (isTimeColumn(operands.get(0))) {
+          return parseInterval(operands.get(1).getLiteral().getStringValue());
+        }
+        return null;
       default:
         return null;
     }
@@ -433,6 +367,32 @@ public class TimeSegmentPruner implements SegmentPruner {
     return res;
   }
 
+  private boolean isTimeColumn(Expression expression) {
+    Identifier identifier = expression.getIdentifier();
+    return identifier != null && identifier.getName().equals(_timeColumn);
+  }
+
+  private long toMillisSinceEpoch(Expression expression) {
+    Literal literal = expression.getLiteral();
+    Preconditions.checkArgument(literal != null, "Literal is required for time column filter, got: %s", expression);
+    String value;
+    Literal._Fields type = literal.getSetField();
+    switch (type) {
+      case INT_VALUE:
+        value = Integer.toString(literal.getIntValue());
+        break;
+      case LONG_VALUE:
+        value = Long.toString(literal.getLongValue());
+        break;
+      case STRING_VALUE:
+        value = literal.getStringValue();
+        break;
+      default:
+        throw new IllegalStateException("Unsupported literal type: " + type + " as time column filter");
+    }
+    return _timeFormatSpec.fromFormatToMillis(value);
+  }
+
   /**
    * Parse interval to millisecond as [min, max] with both sides included.
    * E.g. '(* 16311]' is parsed as [0, 16311], '(1455 16311)' is parsed as [1456, 16310]
@@ -457,10 +417,10 @@ public class TimeSegmentPruner implements SegmentPruner {
         endTime--;
       }
     }
+    return getInterval(startTime, endTime);
+  }
 
-    if (startTime > endTime) {
-      return Collections.emptyList();
-    }
-    return Collections.singletonList(new Interval(startTime, endTime));
+  private static List<Interval> getInterval(long inclusiveStart, long inclusiveEnd) {
+    return inclusiveStart <= inclusiveEnd ? List.of(new Interval(inclusiveStart, inclusiveEnd)) : List.of();
   }
 }

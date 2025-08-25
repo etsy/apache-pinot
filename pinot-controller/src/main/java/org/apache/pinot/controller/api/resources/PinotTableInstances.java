@@ -38,23 +38,34 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.pinot.common.exception.TableNotFoundException;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotTableInstances {
 
@@ -65,6 +76,7 @@ public class PinotTableInstances {
 
   @GET
   @Path("/tables/{tableName}/instances")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.GET_INSTANCE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "List table instances", notes = "List instances of the given table")
   @ApiResponses(value = {
@@ -75,7 +87,8 @@ public class PinotTableInstances {
   public String getTableInstances(
       @ApiParam(value = "Table name without type", required = true) @PathParam("tableName") String tableName,
       @ApiParam(value = "Instance type", example = "broker", allowableValues = "BROKER, SERVER") @DefaultValue("")
-      @QueryParam("type") String type) {
+      @QueryParam("type") String type, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     ObjectNode ret = JsonUtils.newObjectNode();
     ret.put("tableName", tableName);
     ArrayNode brokers = JsonUtils.newArrayNode();
@@ -132,8 +145,10 @@ public class PinotTableInstances {
     return ret.toString();
   }
 
+  @Deprecated
   @GET
   @Path("/tables/{tableName}/livebrokers")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.GET_BROKER)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "List the brokers serving a table", notes = "List live brokers of the given table based on EV")
   @ApiResponses(value = {
@@ -143,7 +158,8 @@ public class PinotTableInstances {
   })
   public List<String> getLiveBrokersForTable(
       @ApiParam(value = "Table name (with or without type)", required = true)
-      @PathParam("tableName") String tableName) {
+      @PathParam("tableName") String tableName, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     try {
       return _pinotHelixResourceManager.getLiveBrokersForTable(tableName);
     } catch (TableNotFoundException e) {
@@ -153,15 +169,18 @@ public class PinotTableInstances {
 
   @GET
   @Path("/tables/livebrokers")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_BROKER)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "List tables to live brokers mappings", notes = "List tables to live brokers mappings based "
       + "on EV")
   @ApiResponses(value = {
       @ApiResponse(code = 200, message = "Success"), @ApiResponse(code = 500, message = "Internal server error")
   })
-  public Map<String, List<InstanceInfo>> getLiveBrokers() {
+  public Map<String, List<InstanceInfo>> getLiveBrokers(@Context HttpHeaders headers,
+      @ApiParam(value = "Table names (with or without type)", allowMultiple = true) @QueryParam("tables")
+      List<String> tables) {
     try {
-      return _pinotHelixResourceManager.getTableToLiveBrokersMapping();
+      return _pinotHelixResourceManager.getTableToLiveBrokersMapping(headers.getHeaderString(DATABASE), tables);
     } catch (Exception e) {
       throw new ControllerApplicationException(LOGGER, e.getMessage(), Response.Status.NOT_FOUND);
     }

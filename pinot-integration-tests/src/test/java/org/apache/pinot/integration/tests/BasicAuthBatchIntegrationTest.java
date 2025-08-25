@@ -28,6 +28,7 @@ import java.util.Map;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.common.exception.HttpErrorStatusException;
 import org.apache.pinot.controller.helix.core.minion.generator.PinotTaskGenerator;
 import org.apache.pinot.minion.executor.PinotTaskExecutor;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -77,32 +78,33 @@ public class BasicAuthBatchIntegrationTest extends ClusterTest {
   }
 
   @Override
-  public Map<String, Object> getDefaultControllerConfiguration() {
-    return BasicAuthTestUtils.addControllerConfiguration(super.getDefaultControllerConfiguration());
+  protected void overrideControllerConf(Map<String, Object> properties) {
+    BasicAuthTestUtils.addControllerConfiguration(properties);
   }
 
   @Override
-  protected PinotConfiguration getDefaultBrokerConfiguration() {
-    return BasicAuthTestUtils.addBrokerConfiguration(super.getDefaultBrokerConfiguration().toMap());
+  protected void overrideBrokerConf(PinotConfiguration brokerConf) {
+    BasicAuthTestUtils.addBrokerConfiguration(brokerConf);
   }
 
   @Override
-  protected PinotConfiguration getDefaultServerConfiguration() {
-    return BasicAuthTestUtils.addServerConfiguration(super.getDefaultServerConfiguration().toMap());
+  protected void overrideServerConf(PinotConfiguration serverConf) {
+    BasicAuthTestUtils.addServerConfiguration(serverConf);
   }
 
   @Override
-  protected PinotConfiguration getDefaultMinionConfiguration() {
-    return BasicAuthTestUtils.addMinionConfiguration(super.getDefaultMinionConfiguration().toMap());
+  protected void overrideMinionConf(PinotConfiguration minionConf) {
+    BasicAuthTestUtils.addMinionConfiguration(minionConf);
   }
 
   @Test
-  public void testBrokerNoAuth()
-      throws Exception {
-    JsonNode response = JsonUtils.stringToJsonNode(
-        sendPostRequest("http://localhost:" + getRandomBrokerPort() + "/query/sql", "{\"sql\":\"SELECT now()\"}"));
-    Assert.assertFalse(response.has("resultTable"), "must not return result table");
-    Assert.assertTrue(response.get("exceptions").get(0).get("errorCode").asInt() != 0, "must return error code");
+  public void testBrokerNoAuth() {
+    try {
+      sendPostRequest("http://localhost:" + getRandomBrokerPort() + "/query/sql", "{\"sql\":\"SELECT now()\"}");
+    } catch (IOException e) {
+      HttpErrorStatusException httpErrorStatusException = (HttpErrorStatusException) e.getCause();
+      Assert.assertEquals(httpErrorStatusException.getStatusCode(), 401, "must return 401");
+    }
   }
 
   @Test
@@ -125,13 +127,12 @@ public class BasicAuthBatchIntegrationTest extends ClusterTest {
   }
 
   @Test
-  public void testControllerGetTablesNoAuth()
-      throws Exception {
+  public void testControllerGetTablesNoAuth() {
     try {
       // NOTE: the endpoint is protected implicitly (without annotation) by BasicAuthAccessControlFactory
       sendGetRequest("http://localhost:" + getControllerPort() + "/tables");
     } catch (IOException e) {
-      Assert.assertTrue(e.getMessage().contains("403"));
+      Assert.assertTrue(e.getMessage().contains("401"));
     }
   }
 
@@ -156,8 +157,8 @@ public class BasicAuthBatchIntegrationTest extends ClusterTest {
 
     // patch ingestion job file
     String jobFileContents = IOUtils.toString(new FileInputStream(jobFile));
-    IOUtils
-        .write(jobFileContents.replaceAll("9000", String.valueOf(getControllerPort())), new FileOutputStream(jobFile));
+    IOUtils.write(jobFileContents.replaceAll("9000", String.valueOf(getControllerPort())),
+        new FileOutputStream(jobFile));
 
     new BootstrapTableTool("http", "localhost", getControllerPort(), baseDir.getAbsolutePath(),
         AuthProviderUtils.makeAuthProvider(AUTH_TOKEN)).execute();
@@ -176,11 +177,13 @@ public class BasicAuthBatchIntegrationTest extends ClusterTest {
         "must return row count 97889");
     Assert.assertTrue(response.get("exceptions").isEmpty(), "must not return exception");
 
-    // user with valid auth but no table access
-    JsonNode responseUser = JsonUtils.stringToJsonNode(
-        sendPostRequest("http://localhost:" + getRandomBrokerPort() + "/query/sql",
-            "{\"sql\":\"SELECT count(*) FROM baseballStats\"}", AUTH_HEADER_USER));
-    Assert.assertFalse(responseUser.has("resultTable"), "must not return result table");
-    Assert.assertTrue(responseUser.get("exceptions").get(0).get("errorCode").asInt() != 0, "must return error code");
+    // user with valid auth but no table access - must return 403
+    try {
+      sendPostRequest("http://localhost:" + getRandomBrokerPort() + "/query/sql",
+          "{\"sql\":\"SELECT count(*) FROM baseballStats\"}", AUTH_HEADER_USER);
+    } catch (IOException e) {
+      HttpErrorStatusException httpErrorStatusException = (HttpErrorStatusException) e.getCause();
+      Assert.assertEquals(httpErrorStatusException.getStatusCode(), 403, "must return 403");
+    }
   }
 }

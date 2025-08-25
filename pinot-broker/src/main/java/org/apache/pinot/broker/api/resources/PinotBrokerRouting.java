@@ -33,16 +33,27 @@ import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import org.apache.pinot.broker.routing.BrokerRoutingManager;
+import org.apache.pinot.common.utils.DatabaseUtils;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = "Routing", authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = "Routing", authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotBrokerRouting {
 
@@ -52,20 +63,23 @@ public class PinotBrokerRouting {
   @PUT
   @Produces(MediaType.TEXT_PLAIN)
   @Path("/routing/{tableName}")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.BUILD_ROUTING)
   @ApiOperation(value = "Build/rebuild the routing for a table", notes = "Build/rebuild the routing for a table")
   @ApiResponses(value = {
       @ApiResponse(code = 200, message = "Success"),
       @ApiResponse(code = 500, message = "Internal server error")
   })
   public String buildRouting(
-      @ApiParam(value = "Table name (with type)") @PathParam("tableName") String tableNameWithType) {
-    _routingManager.buildRouting(tableNameWithType);
+      @ApiParam(value = "Table name (with type)") @PathParam("tableName") String tableNameWithType,
+      @Context HttpHeaders headers) {
+    _routingManager.buildRouting(DatabaseUtils.translateTableName(tableNameWithType, headers));
     return "Success";
   }
 
   @PUT
   @Produces(MediaType.TEXT_PLAIN)
   @Path("/routing/refresh/{tableName}/{segmentName}")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.REFRESH_ROUTING)
   @ApiOperation(value = "Refresh the routing for a segment", notes = "Refresh the routing for a segment")
   @ApiResponses(value = {
       @ApiResponse(code = 200, message = "Success"),
@@ -73,22 +87,25 @@ public class PinotBrokerRouting {
   })
   public String refreshRouting(
       @ApiParam(value = "Table name (with type)") @PathParam("tableName") String tableNameWithType,
-      @ApiParam(value = "Segment name") @PathParam("segmentName") String segmentName) {
-    _routingManager.refreshSegment(tableNameWithType, segmentName);
+      @ApiParam(value = "Segment name") @PathParam("segmentName") String segmentName,
+      @Context HttpHeaders headers) {
+    _routingManager.refreshSegment(DatabaseUtils.translateTableName(tableNameWithType, headers), segmentName);
     return "Success";
   }
 
   @DELETE
   @Produces(MediaType.TEXT_PLAIN)
   @Path("/routing/{tableName}")
+  @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.DELETE_ROUTING)
   @ApiOperation(value = "Remove the routing for a table", notes = "Remove the routing for a table")
   @ApiResponses(value = {
       @ApiResponse(code = 200, message = "Success"),
       @ApiResponse(code = 500, message = "Internal server error")
   })
   public String removeRouting(
-      @ApiParam(value = "Table name (with type)") @PathParam("tableName") String tableNameWithType) {
-    _routingManager.removeRouting(tableNameWithType);
+      @ApiParam(value = "Table name (with type)") @PathParam("tableName") String tableNameWithType,
+      @Context HttpHeaders headers) {
+    _routingManager.removeRouting(DatabaseUtils.translateTableName(tableNameWithType, headers));
     return "Success";
   }
 }

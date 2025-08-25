@@ -19,6 +19,7 @@
 package org.apache.pinot.controller.helix;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -26,28 +27,32 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.common.lineage.SegmentLineage;
 import org.apache.pinot.common.lineage.SegmentLineageAccessHelper;
 import org.apache.pinot.common.lineage.SegmentLineageUtils;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.metrics.ControllerGauge;
+import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
+import org.apache.pinot.common.metrics.ControllerTimer;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.LeadControllerManager;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.periodictask.ControllerPeriodicTask;
 import org.apache.pinot.controller.helix.core.realtime.MissingConsumingSegmentFinder;
+import org.apache.pinot.controller.helix.core.realtime.PinotLLCRealtimeSegmentManager;
 import org.apache.pinot.controller.util.TableSizeReader;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
-import org.apache.pinot.spi.stream.PartitionLevelStreamConfig;
+import org.apache.pinot.spi.config.table.TierConfig;
+import org.apache.pinot.spi.stream.StreamConfig;
 import org.apache.pinot.spi.utils.IngestionConfigUtils;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
@@ -75,6 +80,7 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
   private long _lastDisabledTableLogTimestamp = 0;
 
   private TableSizeReader _tableSizeReader;
+  private Set<String> _tierBackendGauges = new HashSet<>();
 
   /**
    * Constructs the segment status checker.
@@ -90,14 +96,12 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
 
     _waitForPushTimeSeconds = config.getStatusCheckerWaitForPushTimeInSeconds();
     _tableSizeReader =
-        new TableSizeReader(executorService, new MultiThreadedHttpConnectionManager(), _controllerMetrics,
-            _pinotHelixResourceManager);
+        new TableSizeReader(executorService, new PoolingHttpClientConnectionManager(), _controllerMetrics,
+            _pinotHelixResourceManager, leadControllerManager);
   }
 
   @Override
   protected void setUpTask() {
-    LOGGER.info("Initializing table metrics for all the tables.");
-    setStatusToDefault();
   }
 
   @Override
@@ -116,32 +120,82 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
   protected void processTable(String tableNameWithType, Context context) {
     try {
       TableConfig tableConfig = _pinotHelixResourceManager.getTableConfig(tableNameWithType);
-      updateTableConfigMetrics(tableNameWithType, tableConfig);
+      updateTableConfigMetrics(tableNameWithType, tableConfig, context);
       updateSegmentMetrics(tableNameWithType, tableConfig, context);
       updateTableSizeMetrics(tableNameWithType);
     } catch (Exception e) {
       LOGGER.error("Caught exception while updating segment status for table {}", tableNameWithType, e);
       // Remove the metric for this table
-      resetTableMetrics(tableNameWithType);
+      removeMetricsForTable(tableNameWithType);
     }
+    context._processedTables.add(tableNameWithType);
   }
 
   @Override
   protected void postprocess(Context context) {
     _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.REALTIME_TABLE_COUNT, context._realTimeTableCount);
     _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.OFFLINE_TABLE_COUNT, context._offlineTableCount);
-    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.DISABLED_TABLE_COUNT, context._disabledTableCount);
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.UPSERT_TABLE_COUNT, context._upsertTableCount);
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.DISABLED_TABLE_COUNT, context._disabledTables.size());
+
+    _tierBackendGauges.forEach(_controllerMetrics::removeGauge);
+    // metric for total number of tables using a particular tier backend
+    context._tierBackendTableCountMap.forEach((tier, count) -> {
+      String gaugeName = _controllerMetrics.composePluginGaugeName(tier, ControllerGauge.TIER_BACKEND_TABLE_COUNT);
+      _tierBackendGauges.add(gaugeName);
+      _controllerMetrics.setOrUpdateGauge(gaugeName, count);
+    });
+    // metric for total number of tables having tier backend configured
+    _controllerMetrics.setOrUpdateGauge(ControllerGauge.TIER_BACKEND_TABLE_COUNT.getGaugeName(),
+        context._tierBackendConfiguredTableCount);
+
+    //emit a 0 for tables that are not paused/disabled. This makes alert expressions simpler as we don't have to deal
+    // with missing metrics
+    context._processedTables.forEach(tableNameWithType -> {
+      if (context._pausedTables.contains(tableNameWithType)) {
+        _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.TABLE_CONSUMPTION_PAUSED, 1);
+      } else {
+        _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.TABLE_CONSUMPTION_PAUSED, 0);
+      }
+    });
+    context._processedTables.forEach(tableNameWithType -> {
+      if (context._disabledTables.contains(tableNameWithType)) {
+        _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.TABLE_DISABLED, 1);
+      } else {
+        _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.TABLE_DISABLED, 0);
+      }
+    });
   }
 
   /**
    * Updates metrics related to the table config.
    * If table config not found, resets the metrics
    */
-  private void updateTableConfigMetrics(String tableNameWithType, TableConfig tableConfig) {
+  private void updateTableConfigMetrics(String tableNameWithType, TableConfig tableConfig, Context context) {
     if (tableConfig == null) {
       LOGGER.warn("Found null table config for table: {}. Resetting table config metrics.", tableNameWithType);
       _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.REPLICATION_FROM_CONFIG, 0);
       return;
+    }
+    if (tableConfig.getTableType() == TableType.OFFLINE) {
+      context._offlineTableCount++;
+    } else {
+      context._realTimeTableCount++;
+    }
+    if (tableConfig.isUpsertEnabled()) {
+      context._upsertTableCount++;
+    }
+    List<TierConfig> tierConfigList = tableConfig.getTierConfigsList();
+    if (tierConfigList != null && !tierConfigList.isEmpty()) {
+      Set<String> tierBackendSet = new HashSet<>(tierConfigList.size());
+      for (TierConfig config : tierConfigList) {
+        if (config.getTierBackend() != null) {
+          tierBackendSet.add(config.getTierBackend());
+        }
+      }
+      tierBackendSet.forEach(tierBackend -> context._tierBackendTableCountMap.put(tierBackend,
+              context._tierBackendTableCountMap.getOrDefault(tierBackend, 0) + 1));
+      context._tierBackendConfiguredTableCount += tierBackendSet.isEmpty() ? 0 : 1;
     }
     int replication = tableConfig.getReplication();
     _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.REPLICATION_FROM_CONFIG, replication);
@@ -158,17 +212,12 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
    */
   private void updateSegmentMetrics(String tableNameWithType, TableConfig tableConfig, Context context) {
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
-    if (tableType == TableType.OFFLINE) {
-      context._offlineTableCount++;
-    } else {
-      context._realTimeTableCount++;
-    }
 
     IdealState idealState = _pinotHelixResourceManager.getTableIdealState(tableNameWithType);
 
     if (idealState == null) {
       LOGGER.warn("Table {} has null ideal state. Skipping segment status checks", tableNameWithType);
-      resetTableMetrics(tableNameWithType);
+      removeMetricsForTable(tableNameWithType);
       return;
     }
 
@@ -176,9 +225,17 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
       if (context._logDisabledTables) {
         LOGGER.warn("Table {} is disabled. Skipping segment status checks", tableNameWithType);
       }
-      resetTableMetrics(tableNameWithType);
-      context._disabledTableCount++;
+      removeMetricsForTable(tableNameWithType);
+      context._disabledTables.add(tableNameWithType);
       return;
+    }
+
+    //check if table consumption is paused
+    boolean isTablePaused =
+        Boolean.parseBoolean(idealState.getRecord().getSimpleField(PinotLLCRealtimeSegmentManager.IS_TABLE_PAUSED));
+
+    if (isTablePaused) {
+      context._pausedTables.add(tableNameWithType);
     }
 
     if (idealState.getPartitionSet().isEmpty()) {
@@ -215,6 +272,7 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
     int nReplicasExternal = -1; // Keeps track of minimum number of replicas in external view
     int nErrors = 0; // Keeps track of number of segments in error state
     int nOffline = 0; // Keeps track of number segments with no online replicas
+    int nNumOfReplicasLessThanIdeal = 0; // Keeps track of number of segments running with less than expected replicas
     int nSegments = 0; // Counts number of segments
     long tableCompressedSize = 0; // Tracks the total compressed segment size in deep store per table
     for (String partitionName : segmentsExcludeReplaced) {
@@ -276,6 +334,10 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
           LOGGER.warn("Segment {} of table {} has no online replicas", partitionName, tableNameWithType);
         }
         nOffline++;
+      } else if (nReplicas < nReplicasIdealMax) {
+        LOGGER.debug("Segment {} of table {} is running with {} replicas which is less than the expected values {}",
+            partitionName, tableNameWithType, nReplicas, nReplicasIdealMax);
+        nNumOfReplicasLessThanIdeal++;
       }
       nReplicasExternal =
           ((nReplicasExternal > nReplicas) || (nReplicasExternal == -1)) ? nReplicas : nReplicasExternal;
@@ -288,63 +350,61 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
     _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.PERCENT_OF_REPLICAS,
         (nReplicasIdealMax > 0) ? (nReplicasExternal * 100 / nReplicasIdealMax) : 100);
     _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.SEGMENTS_IN_ERROR_STATE, nErrors);
+    _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.SEGMENTS_WITH_LESS_REPLICAS,
+        nNumOfReplicasLessThanIdeal);
     _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.PERCENT_SEGMENTS_AVAILABLE,
-        (nSegments > 0) ? (100 - (nOffline * 100 / nSegments)) : 100);
+        (nSegments > 0) ? (nSegments - nOffline) * 100 / nSegments : 100);
     _controllerMetrics.setValueOfTableGauge(tableNameWithType, ControllerGauge.TABLE_COMPRESSED_SIZE,
         tableCompressedSize);
 
     if (nOffline > 0) {
       LOGGER.warn("Table {} has {} segments with no online replicas", tableNameWithType, nOffline);
     }
+    if (nNumOfReplicasLessThanIdeal > 0) {
+      LOGGER.warn("Table {} has {} segments with number of replicas less than the replication factor",
+          tableNameWithType, nNumOfReplicasLessThanIdeal);
+    }
     if (nReplicasExternal < nReplicasIdealMax) {
-      LOGGER.warn("Table {} has {} replicas, below replication threshold :{}", tableNameWithType, nReplicasExternal,
-          nReplicasIdealMax);
+      LOGGER.warn("Table {} has at least one segment running with only {} replicas, below replication threshold :{}",
+          tableNameWithType, nReplicasExternal, nReplicasIdealMax);
     }
 
     if (tableType == TableType.REALTIME && tableConfig != null) {
-      PartitionLevelStreamConfig streamConfig = new PartitionLevelStreamConfig(tableConfig.getTableName(),
-          IngestionConfigUtils.getStreamConfigMap(tableConfig));
-      new MissingConsumingSegmentFinder(tableNameWithType, propertyStore, _controllerMetrics, streamConfig)
-          .findAndEmitMetrics(idealState);
+      StreamConfig streamConfig =
+          new StreamConfig(tableConfig.getTableName(), IngestionConfigUtils.getStreamConfigMap(tableConfig));
+      new MissingConsumingSegmentFinder(tableNameWithType, propertyStore, _controllerMetrics,
+          streamConfig).findAndEmitMetrics(idealState);
     }
   }
 
   @Override
   protected void nonLeaderCleanup(List<String> tableNamesWithType) {
-    for (String tableNameWithType : tableNamesWithType) {
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.NUMBER_OF_REPLICAS);
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.PERCENT_OF_REPLICAS);
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.PERCENT_SEGMENTS_AVAILABLE);
-
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.IDEALSTATE_ZNODE_SIZE);
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.IDEALSTATE_ZNODE_BYTE_SIZE);
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.SEGMENT_COUNT);
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.SEGMENT_COUNT_INCLUDING_REPLACED);
-
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.SEGMENTS_IN_ERROR_STATE);
-      _controllerMetrics.removeTableGauge(tableNameWithType, ControllerGauge.PERCENT_SEGMENTS_AVAILABLE);
-    }
+    tableNamesWithType.forEach(this::removeMetricsForTable);
   }
 
-  private void setStatusToDefault() {
-    List<String> allTableNames = _pinotHelixResourceManager.getAllTables();
-
-    for (String tableName : allTableNames) {
-      resetTableMetrics(tableName);
+  private void removeMetricsForTable(String tableNameWithType) {
+    LOGGER.info("Removing metrics from {} given it is not a table known by Helix", tableNameWithType);
+    for (ControllerGauge metric : ControllerGauge.values()) {
+      if (!metric.isGlobal()) {
+        _controllerMetrics.removeTableGauge(tableNameWithType, metric);
+      }
     }
-  }
 
-  private void resetTableMetrics(String tableName) {
-    _controllerMetrics.setValueOfTableGauge(tableName, ControllerGauge.NUMBER_OF_REPLICAS, Long.MIN_VALUE);
-    _controllerMetrics.setValueOfTableGauge(tableName, ControllerGauge.PERCENT_OF_REPLICAS, Long.MIN_VALUE);
-    _controllerMetrics.setValueOfTableGauge(tableName, ControllerGauge.SEGMENTS_IN_ERROR_STATE, Long.MIN_VALUE);
-    _controllerMetrics.setValueOfTableGauge(tableName, ControllerGauge.PERCENT_SEGMENTS_AVAILABLE, Long.MIN_VALUE);
+    for (ControllerMeter metric : ControllerMeter.values()) {
+      if (!metric.isGlobal()) {
+        _controllerMetrics.removeTableMeter(tableNameWithType, metric);
+      }
+    }
+
+    for (ControllerTimer metric : ControllerTimer.values()) {
+      if (!metric.isGlobal()) {
+        _controllerMetrics.removeTableTimer(tableNameWithType, metric);
+      }
+    }
   }
 
   @Override
   public void cleanUpTask() {
-    LOGGER.info("Resetting table metrics for all the tables.");
-    setStatusToDefault();
   }
 
   @VisibleForTesting
@@ -356,6 +416,11 @@ public class SegmentStatusChecker extends ControllerPeriodicTask<SegmentStatusCh
     private boolean _logDisabledTables;
     private int _realTimeTableCount;
     private int _offlineTableCount;
-    private int _disabledTableCount;
+    private int _upsertTableCount;
+    private int _tierBackendConfiguredTableCount;
+    private Map<String, Integer> _tierBackendTableCountMap = new HashMap<>();
+    private Set<String> _processedTables = new HashSet<>();
+    private Set<String> _disabledTables = new HashSet<>();
+    private Set<String> _pausedTables = new HashSet<>();
   }
 }

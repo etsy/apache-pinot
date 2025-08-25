@@ -50,7 +50,7 @@ public class ConsistentDataPushUtils {
   private ConsistentDataPushUtils() {
   }
 
-  private static final Logger LOGGER = LoggerFactory.getLogger(SegmentPushUtils.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(ConsistentDataPushUtils.class);
   private static final FileUploadDownloadClient FILE_UPLOAD_DOWNLOAD_CLIENT = new FileUploadDownloadClient();
   private static final RetryPolicy DEFAULT_RETRY_POLICY = RetryPolicies.exponentialBackoffRetryPolicy(5, 10_000L, 2.0);
   public static final String SEGMENT_NAME_POSTFIX = "segment.name.postfix";
@@ -62,10 +62,10 @@ public class ConsistentDataPushUtils {
   public static Map<URI, String> preUpload(SegmentGenerationJobSpec spec, List<String> segmentsTo)
       throws Exception {
     String rawTableName = spec.getTableSpec().getTableName();
-    LOGGER.info("Start consistent push for table: " + rawTableName);
+    LOGGER.info("Start consistent push for table: {}", rawTableName);
     Map<URI, List<String>> uriToExistingOfflineSegments = getSegmentsToReplace(spec, rawTableName);
-    LOGGER.info("Existing segments for table {}: " + uriToExistingOfflineSegments, rawTableName);
-    LOGGER.info("New segments for table: {}: " + segmentsTo, rawTableName);
+    LOGGER.info("Existing segments for table {}: {}", rawTableName, uriToExistingOfflineSegments);
+    LOGGER.info("New segments for table: {}: {}", rawTableName, segmentsTo);
     return startReplaceSegments(spec, uriToExistingOfflineSegments, segmentsTo);
   }
 
@@ -77,7 +77,7 @@ public class ConsistentDataPushUtils {
       throws Exception {
     String rawTableName = spec.getTableSpec().getTableName();
     if (uriToLineageEntryIdMap != null && !uriToLineageEntryIdMap.isEmpty()) {
-      LOGGER.info("End consistent push for table: " + rawTableName);
+      LOGGER.info("End consistent push for table: {}", rawTableName);
       endReplaceSegments(spec, uriToLineageEntryIdMap);
     }
   }
@@ -112,7 +112,7 @@ public class ConsistentDataPushUtils {
     String rawTableName = spec.getTableSpec().getTableName();
     Map<URI, URI> segmentsUris = getStartReplaceSegmentUris(spec, rawTableName);
     AuthProvider authProvider = AuthProviderUtils.makeAuthProvider(spec.getAuthToken());
-    LOGGER.info("Start replace segment URIs: " + segmentsUris);
+    LOGGER.info("Start replace segment URIs: {}", segmentsUris);
 
     for (Map.Entry<URI, URI> entry : segmentsUris.entrySet()) {
       URI controllerUri = entry.getKey();
@@ -168,7 +168,8 @@ public class ConsistentDataPushUtils {
       DEFAULT_RETRY_POLICY.attempt(() -> {
         try {
           SimpleHttpResponse response =
-              FILE_UPLOAD_DOWNLOAD_CLIENT.endReplaceSegments(uri, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS, authProvider);
+              FILE_UPLOAD_DOWNLOAD_CLIENT.endReplaceSegments(uri, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS,
+                  null, authProvider);
           LOGGER.info("Got response {}: {} while sending end replace segment request for table: {}, uploadURI: {}",
               response.getStatusCode(), response.getResponse(), rawTableName, uri);
           return true;
@@ -229,13 +230,14 @@ public class ConsistentDataPushUtils {
   public static Map<URI, List<String>> getSegmentsToReplace(SegmentGenerationJobSpec spec, String rawTableName)
       throws Exception {
     Map<URI, List<String>> uriToOfflineSegments = new HashMap<>();
+    AuthProvider authProvider = AuthProviderUtils.makeAuthProvider(spec.getAuthToken());
     for (PinotClusterSpec pinotClusterSpec : spec.getPinotClusterSpecs()) {
       URI controllerURI;
       List<String> offlineSegments;
       try {
         controllerURI = new URI(pinotClusterSpec.getControllerURI());
         Map<String, List<String>> segments =
-            FILE_UPLOAD_DOWNLOAD_CLIENT.getSegments(controllerURI, rawTableName, TableType.OFFLINE, true);
+          FILE_UPLOAD_DOWNLOAD_CLIENT.getSegments(controllerURI, rawTableName, TableType.OFFLINE, true, authProvider);
         offlineSegments = segments.get(TableType.OFFLINE.toString());
         uriToOfflineSegments.put(controllerURI, offlineSegments);
       } catch (URISyntaxException e) {

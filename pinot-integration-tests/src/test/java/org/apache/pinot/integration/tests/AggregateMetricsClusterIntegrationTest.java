@@ -58,7 +58,7 @@ public class AggregateMetricsClusterIntegrationTest extends BaseClusterIntegrati
 
     // Create and upload the schema and table config with reduced number of columns and aggregate metrics on
     Schema schema =
-        new Schema.SchemaBuilder().setSchemaName(getSchemaName()).addSingleValueDimension("Carrier", DataType.STRING)
+        new Schema.SchemaBuilder().setSchemaName(getTableName()).addSingleValueDimension("Carrier", DataType.STRING)
             .addSingleValueDimension("Origin", DataType.STRING).addMetric("AirTime", DataType.LONG)
             .addMetric("ArrDelay", DataType.DOUBLE)
             .addDateTime("DaysSinceEpoch", DataType.INT, "1:DAYS:EPOCH", "1:DAYS").build();
@@ -90,7 +90,7 @@ public class AggregateMetricsClusterIntegrationTest extends BaseClusterIntegrati
     String sql = "SELECT SUM(AirTime), SUM(ArrDelay) FROM mytable";
     TestUtils.waitForCondition(aVoid -> {
       try {
-        JsonNode queryResult = postQuery(sql, _brokerBaseApiUrl);
+        JsonNode queryResult = postQuery(sql);
         JsonNode aggregationResults = queryResult.get("resultTable").get("rows").get(0);
         return aggregationResults.get(0).asInt() == -165429728 && aggregationResults.get(1).asInt() == -175625957;
       } catch (Exception e) {
@@ -99,9 +99,10 @@ public class AggregateMetricsClusterIntegrationTest extends BaseClusterIntegrati
     }, 100L, timeoutMs, "Failed to load all documents");
   }
 
-  @Test
-  public void testQueries()
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testQueries(boolean useMultiStageQueryEngine)
       throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
     String query = "SELECT SUM(AirTime), SUM(ArrDelay) FROM mytable";
     testQuery(query);
     query = "SELECT SUM(AirTime), DaysSinceEpoch FROM mytable GROUP BY DaysSinceEpoch ORDER BY SUM(AirTime) DESC";

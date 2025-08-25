@@ -52,6 +52,7 @@ public class MinionConstants {
    */
   public static final String TIMEOUT_MS_KEY_SUFFIX = ".timeoutMs";
   public static final String NUM_CONCURRENT_TASKS_PER_INSTANCE_KEY_SUFFIX = ".numConcurrentTasksPerInstance";
+  public static final String MAX_ATTEMPTS_PER_TASK_KEY_SUFFIX = ".maxAttemptsPerTask";
 
   /**
    * Table level configs
@@ -59,10 +60,10 @@ public class MinionConstants {
   public static final String TABLE_MAX_NUM_TASKS_KEY = "tableMaxNumTasks";
   public static final String ENABLE_REPLACE_SEGMENTS_KEY = "enableReplaceSegments";
 
-  public static class ConvertToRawIndexTask {
-    public static final String TASK_TYPE = "ConvertToRawIndexTask";
-    public static final String COLUMNS_TO_CONVERT_KEY = "columnsToConvert";
-  }
+  /**
+   * Job configs
+   */
+  public static final int DEFAULT_MAX_ATTEMPTS_PER_TASK = 1;
 
   // Purges rows inside segment that match chosen criteria
   public static class PurgeTask {
@@ -96,10 +97,14 @@ public class MinionConstants {
     // Merge config
     public static final String MERGE_TYPE_KEY = "mergeType";
     public static final String AGGREGATION_TYPE_KEY_SUFFIX = ".aggregationType";
+    public static final String MODE = "mode";
+    public static final String PROCESS_FROM_WATERMARK_MODE = "processFromWatermark";
+    public static final String PROCESS_ALL_MODE = "processAll";
 
     // Segment config
     public static final String MAX_NUM_RECORDS_PER_TASK_KEY = "maxNumRecordsPerTask";
     public static final String MAX_NUM_RECORDS_PER_SEGMENT_KEY = "maxNumRecordsPerSegment";
+    public static final String SEGMENT_MAPPER_FILE_SIZE_IN_BYTES = "segmentMapperFileSizeThresholdInBytes";
     public static final String MAX_NUM_PARALLEL_BUCKETS = "maxNumParallelBuckets";
     public static final String SEGMENT_NAME_PREFIX_KEY = "segmentNamePrefix";
     public static final String SEGMENT_NAME_POSTFIX_KEY = "segmentNamePostfix";
@@ -120,6 +125,9 @@ public class MinionConstants {
     public static final String SEGMENT_ZK_METADATA_TIME_KEY = TASK_TYPE + TASK_TIME_SUFFIX;
 
     public static final String MERGED_SEGMENT_NAME_PREFIX = "merged_";
+
+    // Custom segment group manager class name
+    public static final String SEGMENT_GROUP_MANAGER_CLASS_NAME_KEY = "segment.group.manager.class.name";
   }
 
   /**
@@ -137,5 +145,34 @@ public class MinionConstants {
     public static final String TASK_TYPE = "SegmentGenerationAndPushTask";
     public static final String CONFIG_NUMBER_CONCURRENT_TASKS_PER_INSTANCE =
         "SegmentGenerationAndPushTask.numConcurrentTasksPerInstance";
+  }
+
+  public static class UpsertCompactionTask {
+    public static final String TASK_TYPE = "UpsertCompactionTask";
+    /**
+     * The time period to wait before picking segments for this task
+     * e.g. if set to "2d", no task will be scheduled for a time window younger than 2 days
+     */
+    public static final String BUFFER_TIME_PERIOD_KEY = "bufferTimePeriod";
+    /**
+     * The maximum percent of old records allowed for a completed segment.
+     * e.g. if the percent surpasses 30, then the segment may be compacted
+     */
+    public static final String INVALID_RECORDS_THRESHOLD_PERCENT = "invalidRecordsThresholdPercent";
+    /**
+     * The maximum count of old records for a completed segment
+     * e.g. if the count surpasses 100k, then the segment may be compacted
+     */
+    public static final String INVALID_RECORDS_THRESHOLD_COUNT = "invalidRecordsThresholdCount";
+
+    /**
+     * Valid doc ids type
+     */
+    public static final String VALID_DOC_IDS_TYPE = "validDocIdsType";
+
+    /**
+     * number of segments to query in one batch to fetch valid doc id metadata, by default 500
+     */
+    public static final String NUM_SEGMENTS_BATCH_PER_SERVER_REQUEST = "numSegmentsBatchPerServerRequest";
   }
 }

@@ -18,9 +18,10 @@
  */
 package org.apache.pinot.common.function.scalar;
 
+import org.apache.calcite.linq4j.function.Strict;
 import org.apache.pinot.spi.annotations.ScalarFunction;
 
-
+@Strict
 public class ComparisonFunctions {
 
   private static final double DOUBLE_COMPARISON_TOLERANCE = 1e-7d;
@@ -61,6 +62,6 @@ public class ComparisonFunctions {
 
   @ScalarFunction
   public static boolean between(double val, double a, double b) {
-    return val > a && val < b;
+    return val >= a && val <= b;
   }
 }

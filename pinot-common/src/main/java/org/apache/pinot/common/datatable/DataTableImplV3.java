@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.HashUtil;
 import org.apache.pinot.spi.accounting.ThreadResourceUsageProvider;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -147,15 +148,12 @@ public class DataTableImplV3 extends BaseDataTable {
     }
 
     // Read variable size data.
+    _variableSizeDataBytes = new byte[variableSizeDataLength];
     if (variableSizeDataLength != 0) {
-      _variableSizeDataBytes = new byte[variableSizeDataLength];
       byteBuffer.position(variableSizeDataStart);
       byteBuffer.get(_variableSizeDataBytes);
-      _variableSizeData = ByteBuffer.wrap(_variableSizeDataBytes);
-    } else {
-      _variableSizeDataBytes = null;
-      _variableSizeData = null;
     }
+    _variableSizeData = ByteBuffer.wrap(_variableSizeDataBytes);
 
     // Read metadata.
     int metadataLength = byteBuffer.getInt();
@@ -394,7 +392,7 @@ public class DataTableImplV3 extends BaseDataTable {
   private Map<Integer, String> deserializeExceptions(ByteBuffer buffer)
       throws IOException {
     int numExceptions = buffer.getInt();
-    Map<Integer, String> exceptions = new HashMap<>(numExceptions);
+    Map<Integer, String> exceptions = new HashMap<>(HashUtil.getHashMapCapacity(numExceptions));
     for (int i = 0; i < numExceptions; i++) {
       int errCode = buffer.getInt();
       String errMessage = DataTableUtils.decodeString(buffer);

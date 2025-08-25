@@ -23,6 +23,11 @@ import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
 import io.swagger.annotations.ApiResponse;
 import io.swagger.annotations.ApiResponses;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.concurrent.atomic.AtomicBoolean;
+import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Named;
 import javax.ws.rs.GET;
@@ -36,6 +41,9 @@ import org.apache.pinot.common.metrics.ServerMeter;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.common.utils.ServiceStatus;
 import org.apache.pinot.common.utils.ServiceStatus.Status;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.server.api.AdminApiApplication;
 
 
@@ -47,11 +55,18 @@ import org.apache.pinot.server.api.AdminApiApplication;
 public class HealthCheckResource {
 
   @Inject
+  private AtomicBoolean _shutDownInProgress;
+
+  @Inject
   @Named(AdminApiApplication.SERVER_INSTANCE_ID)
   private String _instanceId;
 
   @Inject
   private ServerMetrics _serverMetrics;
+
+  @Inject
+  @Named(AdminApiApplication.START_TIME)
+  private Instant _startTime;
 
   @GET
   @Path("/health")
@@ -62,11 +77,12 @@ public class HealthCheckResource {
       @ApiResponse(code = 503, message = "Server is not healthy")
   })
   public String checkHealth(
-      @ApiParam(value = "health check type: liveness or readiness") @QueryParam("checkType") String checkType) {
+      @ApiParam(value = "health check type: liveness or readiness") @QueryParam("checkType") @Nullable
+      String checkType) {
     if ("liveness".equalsIgnoreCase(checkType)) {
-      return "OK";
+      return checkLiveness();
     } else {
-      return getReadinessStatus();
+      return checkReadiness();
     }
   }
 
@@ -92,10 +108,11 @@ public class HealthCheckResource {
       @ApiResponse(code = 503, message = "Server is not ready to serve queries")
   })
   public String checkReadiness() {
-    return getReadinessStatus();
-  }
-
-  private String getReadinessStatus() throws WebApplicationException {
+    if (_shutDownInProgress.get()) {
+      String errMessage = "Server is shutting down";
+      throw new WebApplicationException(errMessage,
+          Response.status(Response.Status.SERVICE_UNAVAILABLE).entity(errMessage).build());
+    }
     Status status = ServiceStatus.getServiceStatus(_instanceId);
     if (status == Status.GOOD) {
       _serverMetrics.addMeteredGlobalValue(ServerMeter.READINESS_CHECK_OK_CALLS, 1);
@@ -106,5 +123,29 @@ public class HealthCheckResource {
     Response response =
         Response.status(Response.Status.SERVICE_UNAVAILABLE).entity(errMessage).build();
     throw new WebApplicationException(errMessage, response);
+  }
+
+  @GET
+  @Produces(MediaType.TEXT_PLAIN)
+  @Path("uptime")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_HEALTH)
+  @ApiOperation(value = "Get server uptime")
+  public long getUptime() {
+    if (_startTime == null) {
+      return 0;
+    }
+    Instant now = Instant.now();
+    Duration uptime = Duration.between(_startTime, now);
+    return uptime.getSeconds();
+  }
+
+  @GET
+  @Path("start-time")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_HEALTH)
+  @ApiOperation(value = "Get server start time")
+  @Produces(MediaType.TEXT_PLAIN)
+  public String getStartTime() {
+    DateTimeFormatter formatter = DateTimeFormatter.ISO_INSTANT;
+    return _startTime != null ? formatter.format(_startTime) : "";
   }
 }

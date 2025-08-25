@@ -31,8 +31,10 @@ import java.util.concurrent.Future;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
 import org.apache.helix.task.TaskState;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.lineage.SegmentLineageAccessHelper;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
+import org.apache.pinot.common.metrics.MetricValueUtils;
 import org.apache.pinot.common.minion.MergeRollupTaskMetadata;
 import org.apache.pinot.common.minion.MinionTaskMetadataUtils;
 import org.apache.pinot.common.utils.SqlResultComparator;
@@ -51,8 +53,10 @@ import org.apache.pinot.spi.config.table.TableTaskConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.ingestion.batch.BatchConfigProperties;
+import org.apache.pinot.spi.stream.StreamConfigProperties;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
+import org.apache.pinot.tools.utils.KafkaStarterUtils;
 import org.apache.pinot.util.TestUtils;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -73,6 +77,8 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
   private static final String MULTI_LEVEL_CONCAT_TEST_TABLE = "myTable3";
   private static final String SINGLE_LEVEL_CONCAT_METADATA_TEST_TABLE = "myTable4";
   private static final String SINGLE_LEVEL_CONCAT_TEST_REALTIME_TABLE = "myTable5";
+  private static final String MULTI_LEVEL_CONCAT_PROCESS_ALL_REALTIME_TABLE = "myTable6";
+  private static final String PROCESS_ALL_MODE_KAFKA_TOPIC = "myKafkaTopic";
   private static final long TIMEOUT_IN_MS = 10_000L;
 
   protected PinotHelixTaskResourceManager _helixTaskResourceManager;
@@ -83,27 +89,37 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
   protected final File _segmentDir2 = new File(_tempDir, "segmentDir2");
   protected final File _segmentDir3 = new File(_tempDir, "segmentDir3");
   protected final File _segmentDir4 = new File(_tempDir, "segmentDir4");
+  protected final File _segmentDir5 = new File(_tempDir, "segmentDir5");
   protected final File _tarDir1 = new File(_tempDir, "tarDir1");
   protected final File _tarDir2 = new File(_tempDir, "tarDir2");
   protected final File _tarDir3 = new File(_tempDir, "tarDir3");
   protected final File _tarDir4 = new File(_tempDir, "tarDir4");
+  protected final File _tarDir5 = new File(_tempDir, "tarDir5");
 
   @BeforeClass
   public void setUp()
       throws Exception {
     TestUtils.ensureDirectoriesExistAndEmpty(_tempDir, _segmentDir1, _segmentDir2, _segmentDir3, _segmentDir4,
-        _tarDir1, _tarDir2, _tarDir3, _tarDir4);
+        _segmentDir5, _tarDir1, _tarDir2, _tarDir3, _tarDir4, _tarDir5);
 
     // Start the Pinot cluster
     startZk();
     startController();
-    startBrokers(1);
-    startServers(1);
+    startBroker();
+    startServer();
     // Start Kafka
     startKafka();
 
     // Create and upload the schema and table config
     Schema schema = createSchema();
+    addSchema(schema);
+    schema.setSchemaName(SINGLE_LEVEL_CONCAT_TEST_TABLE);
+    addSchema(schema);
+    schema.setSchemaName(SINGLE_LEVEL_ROLLUP_TEST_TABLE);
+    addSchema(schema);
+    schema.setSchemaName(MULTI_LEVEL_CONCAT_TEST_TABLE);
+    addSchema(schema);
+    schema.setSchemaName(SINGLE_LEVEL_CONCAT_METADATA_TEST_TABLE);
     addSchema(schema);
     TableConfig singleLevelConcatTableConfig =
         createOfflineTableConfig(SINGLE_LEVEL_CONCAT_TEST_TABLE, getSingleLevelConcatTaskConfig());
@@ -123,14 +139,14 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     List<File> avroFiles = unpackAvroData(_tempDir);
 
     // Create and upload segments
-    ClusterIntegrationTestUtils
-        .buildSegmentsFromAvro(avroFiles, singleLevelConcatTableConfig, schema, 0, _segmentDir1, _tarDir1);
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(avroFiles, singleLevelConcatTableConfig, schema, 0, _segmentDir1,
+        _tarDir1);
     buildSegmentsFromAvroWithPostfix(avroFiles, singleLevelRollupTableConfig, schema, 0, _segmentDir2, _tarDir2, "1");
     buildSegmentsFromAvroWithPostfix(avroFiles, singleLevelRollupTableConfig, schema, 0, _segmentDir2, _tarDir2, "2");
-    ClusterIntegrationTestUtils
-        .buildSegmentsFromAvro(avroFiles, multiLevelConcatTableConfig, schema, 0, _segmentDir3, _tarDir3);
-    ClusterIntegrationTestUtils
-        .buildSegmentsFromAvro(avroFiles, singleLevelConcatMetadataTableConfig, schema, 0, _segmentDir4, _tarDir4);
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(avroFiles, multiLevelConcatTableConfig, schema, 0, _segmentDir3,
+        _tarDir3);
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(avroFiles, singleLevelConcatMetadataTableConfig, schema, 0,
+        _segmentDir4, _tarDir4);
     uploadSegments(SINGLE_LEVEL_CONCAT_TEST_TABLE, _tarDir1);
     uploadSegments(SINGLE_LEVEL_ROLLUP_TEST_TABLE, _tarDir2);
     uploadSegments(MULTI_LEVEL_CONCAT_TEST_TABLE, _tarDir3);
@@ -139,8 +155,25 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     // create the realtime table
     TableConfig tableConfig = createRealtimeTableConfig(avroFiles.get(0));
     addTableConfig(tableConfig);
+    _kafkaStarters.get(0)
+        .createTopic(PROCESS_ALL_MODE_KAFKA_TOPIC, KafkaStarterUtils.getTopicCreationProps(getNumKafkaPartitions()));
+    schema.setSchemaName(MULTI_LEVEL_CONCAT_PROCESS_ALL_REALTIME_TABLE);
+    addSchema(schema);
+    TableConfig singleLevelConcatProcessAllRealtimeTableConfig =
+        createRealtimeTableConfigWithProcessAllMode(avroFiles.get(0), MULTI_LEVEL_CONCAT_PROCESS_ALL_REALTIME_TABLE,
+            PROCESS_ALL_MODE_KAFKA_TOPIC);
+    addTableConfig(singleLevelConcatProcessAllRealtimeTableConfig);
+
     // Push data into Kafka
     pushAvroIntoKafka(avroFiles);
+    ClusterIntegrationTestUtils.pushAvroIntoKafka(avroFiles.subList(9, 12), "localhost:" + getKafkaPort(),
+        PROCESS_ALL_MODE_KAFKA_TOPIC, getMaxNumKafkaMessagesPerBatch(), getKafkaMessageHeader(), getPartitionColumn(),
+        injectTombstones());
+    ClusterIntegrationTestUtils.pushAvroIntoKafka(avroFiles.subList(0, 3), "localhost:" + getKafkaPort(),
+        PROCESS_ALL_MODE_KAFKA_TOPIC, getMaxNumKafkaMessagesPerBatch(), getKafkaMessageHeader(), getPartitionColumn(),
+        injectTombstones());
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(avroFiles.subList(3, 9),
+        singleLevelConcatProcessAllRealtimeTableConfig, schema, 0, _segmentDir5, _tarDir5);
     // Wait for all documents loaded
     waitForAllDocsLoaded(600_000L);
 
@@ -182,14 +215,46 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
 
   private TableConfig createOfflineTableConfig(String tableName, TableTaskConfig taskConfig,
       @Nullable SegmentPartitionConfig partitionConfig) {
-    return new TableConfigBuilder(TableType.OFFLINE).setTableName(tableName).setSchemaName(getSchemaName())
-        .setTimeColumnName(getTimeColumnName()).setSortedColumn(getSortedColumn())
-        .setInvertedIndexColumns(getInvertedIndexColumns()).setNoDictionaryColumns(getNoDictionaryColumns())
-        .setRangeIndexColumns(getRangeIndexColumns()).setBloomFilterColumns(getBloomFilterColumns())
-        .setFieldConfigList(getFieldConfigs()).setNumReplicas(getNumReplicas()).setSegmentVersion(getSegmentVersion())
-        .setLoadMode(getLoadMode()).setTaskConfig(taskConfig).setBrokerTenant(getBrokerTenant())
-        .setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig())
-        .setNullHandlingEnabled(getNullHandlingEnabled()).setSegmentPartitionConfig(partitionConfig).build();
+    return new TableConfigBuilder(TableType.OFFLINE).setTableName(tableName).setTimeColumnName(getTimeColumnName())
+        .setSortedColumn(getSortedColumn()).setInvertedIndexColumns(getInvertedIndexColumns())
+        .setNoDictionaryColumns(getNoDictionaryColumns()).setRangeIndexColumns(getRangeIndexColumns())
+        .setBloomFilterColumns(getBloomFilterColumns()).setFieldConfigList(getFieldConfigs())
+        .setNumReplicas(getNumReplicas()).setSegmentVersion(getSegmentVersion()).setLoadMode(getLoadMode())
+        .setTaskConfig(taskConfig).setBrokerTenant(getBrokerTenant()).setServerTenant(getServerTenant())
+        .setIngestionConfig(getIngestionConfig()).setNullHandlingEnabled(getNullHandlingEnabled())
+        .setSegmentPartitionConfig(partitionConfig).build();
+  }
+
+  protected TableConfig createRealtimeTableConfigWithProcessAllMode(File sampleAvroFile, String tableName,
+      String topicName) {
+    AvroFileSchemaKafkaAvroMessageDecoder._avroFile = sampleAvroFile;
+    Map<String, String> streamConfigs = getStreamConfigMap();
+    streamConfigs.put(StreamConfigProperties.constructStreamProperty("kafka", StreamConfigProperties.STREAM_TOPIC_NAME),
+        topicName);
+    Map<String, String> tableTaskConfigs = new HashMap<>();
+    tableTaskConfigs.put("100days.mergeType", "concat");
+    tableTaskConfigs.put("100days.bufferTimePeriod", "1d");
+    tableTaskConfigs.put("100days.bucketTimePeriod", "100d");
+    tableTaskConfigs.put("100days.maxNumRecordsPerSegment", "15000");
+    tableTaskConfigs.put("100days.maxNumRecordsPerTask", "15000");
+    tableTaskConfigs.put("200days.mergeType", "concat");
+    tableTaskConfigs.put("200days.bufferTimePeriod", "1d");
+    tableTaskConfigs.put("200days.bucketTimePeriod", "200d");
+    tableTaskConfigs.put("200days.maxNumRecordsPerSegment", "15000");
+    tableTaskConfigs.put("200days.maxNumRecordsPerTask", "30000");
+    tableTaskConfigs.put("ActualElapsedTime.aggregationType", "min");
+    tableTaskConfigs.put("WeatherDelay.aggregationType", "sum");
+    tableTaskConfigs.put("mode", "processAll");
+    return new TableConfigBuilder(TableType.REALTIME).setTableName(tableName).setTimeColumnName(getTimeColumnName())
+        .setSortedColumn(getSortedColumn()).setInvertedIndexColumns(getInvertedIndexColumns())
+        .setNoDictionaryColumns(getNoDictionaryColumns()).setRangeIndexColumns(getRangeIndexColumns())
+        .setBloomFilterColumns(getBloomFilterColumns()).setFieldConfigList(getFieldConfigs())
+        .setNumReplicas(getNumReplicas()).setSegmentVersion(getSegmentVersion()).setLoadMode(getLoadMode())
+        .setTaskConfig(
+            new TableTaskConfig(Collections.singletonMap(MinionConstants.MergeRollupTask.TASK_TYPE, tableTaskConfigs)))
+        .setBrokerTenant(getBrokerTenant()).setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig())
+        .setQueryConfig(getQueryConfig()).setStreamConfigs(streamConfigs)
+        .setNullHandlingEnabled(getNullHandlingEnabled()).build();
   }
 
   private TableTaskConfig getSingleLevelConcatTaskConfig() {
@@ -337,21 +402,24 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //      -> {merged_100days_T5_0_myTable1_16400_16435_0}
 
     String sqlQuery = "SELECT count(*) FROM myTable1"; // 115545 rows for the test table
-    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery);
     int[] expectedNumSubTasks = {1, 2, 2, 2, 1};
     int[] expectedNumSegmentsQueried = {13, 12, 13, 13, 12};
     long expectedWatermark = 16000 * 86_400_000L;
     String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(SINGLE_LEVEL_CONCAT_TEST_TABLE);
     int numTasks = 0;
-    for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
-        tasks != null; tasks =
-        _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
+    List<String> taskList;
+    for (String tasks =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
       assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
-      assertNull(
-          _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
+      assertNull(_taskManager.scheduleAllTasksForTable(offlineTableName, null)
+          .get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
       waitForTaskToComplete();
 
       // Check watermark
@@ -378,7 +446,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
       TestUtils.waitForCondition(aVoid -> {
         try {
           // Check num total doc of merged segments are the same as the original segments
-          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          JsonNode actualJson = postQuery(sqlQuery);
           if (!SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery)) {
             return false;
           }
@@ -393,9 +461,8 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     // Check total tasks
     assertEquals(numTasks, 5);
 
-    assertTrue(_controllerStarter.getControllerMetrics()
-        .containsGauge("mergeRollupTaskDelayInNumBuckets.myTable1_OFFLINE.100days"));
-
+    assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+        "mergeRollupTaskDelayInNumBuckets.myTable1_OFFLINE.100days"));
     // Drop the table
     dropOfflineTable(SINGLE_LEVEL_CONCAT_TEST_TABLE);
 
@@ -450,21 +517,24 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //      -> {merged_100days_T5_0_myTable1_16400_16435_0}
 
     String sqlQuery = "SELECT count(*) FROM myTable4"; // 115545 rows for the test table
-    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery);
     int[] expectedNumSubTasks = {1, 2, 2, 2, 1};
     int[] expectedNumSegmentsQueried = {13, 12, 13, 13, 12};
     long expectedWatermark = 16000 * 86_400_000L;
     String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(SINGLE_LEVEL_CONCAT_METADATA_TEST_TABLE);
     int numTasks = 0;
-    for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
-        tasks != null; tasks =
-        _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
+    List<String> taskList;
+    for (String tasks =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
       assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
-      assertNull(
-          _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
+      assertNull(_taskManager.scheduleAllTasksForTable(offlineTableName, null)
+          .get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
       waitForTaskToComplete();
 
       // Check watermark
@@ -491,7 +561,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
       TestUtils.waitForCondition(aVoid -> {
         try {
           // Check num total doc of merged segments are the same as the original segments
-          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          JsonNode actualJson = postQuery(sqlQuery);
           if (!SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery)) {
             return false;
           }
@@ -506,8 +576,8 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     // Check total tasks
     assertEquals(numTasks, 5);
 
-    assertTrue(_controllerStarter.getControllerMetrics()
-        .containsGauge("mergeRollupTaskDelayInNumBuckets.myTable4_OFFLINE.100days"));
+    assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+        "mergeRollupTaskDelayInNumBuckets.myTable4_OFFLINE.100days"));
 
     // Drop the table
     dropOfflineTable(SINGLE_LEVEL_CONCAT_METADATA_TEST_TABLE);
@@ -556,20 +626,23 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //      -> {merged_150days_1628644105127_0_myTable2_16352_16429_0}
 
     String sqlQuery = "SELECT count(*) FROM myTable2"; // 115545 rows for the test table
-    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery);
     int[] expectedNumSegmentsQueried = {16, 7, 3};
     long expectedWatermark = 16050 * 86_400_000L;
     String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(SINGLE_LEVEL_ROLLUP_TEST_TABLE);
     int numTasks = 0;
-    for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
-        tasks != null; tasks =
-        _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
+    List<String> taskList;
+    for (String tasks =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
       assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), 1);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
-      assertNull(
-          _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
+      assertNull(_taskManager.scheduleAllTasksForTable(offlineTableName, null)
+          .get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
       waitForTaskToComplete();
 
       // Check watermark
@@ -596,7 +669,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
       TestUtils.waitForCondition(aVoid -> {
         try {
           // Check total doc of merged segments are less than the original segments
-          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          JsonNode actualJson = postQuery(sqlQuery);
           if (actualJson.get("resultTable").get("rows").get(0).get(0).asInt() >= expectedJson.get("resultTable")
               .get("rows").get(0).get(0).asInt()) {
             return false;
@@ -611,7 +684,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     }
 
     // Check total doc is half of the original after all merge tasks are finished
-    JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode actualJson = postQuery(sqlQuery);
     assertEquals(actualJson.get("resultTable").get("rows").get(0).get(0).asInt(),
         expectedJson.get("resultTable").get("rows").get(0).get(0).asInt() / 2);
     // Check time column is rounded
@@ -624,8 +697,8 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     // Check total tasks
     assertEquals(numTasks, 3);
 
-    assertTrue(_controllerStarter.getControllerMetrics()
-        .containsGauge("mergeRollupTaskDelayInNumBuckets.myTable2_OFFLINE.150days"));
+    assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+        "mergeRollupTaskDelayInNumBuckets.myTable2_OFFLINE.150days"));
   }
 
   /**
@@ -695,7 +768,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //    90days: [16380, 16470) is not a valid merge window because windowEndTime > 45days watermark, not scheduling
 
     String sqlQuery = "SELECT count(*) FROM myTable3"; // 115545 rows for the test table
-    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery);
     int[] expectedNumSubTasks = {1, 2, 1, 2, 1, 2, 1, 2, 1};
     int[] expectedNumSegmentsQueried = {12, 12, 11, 10, 9, 8, 7, 6, 5};
     Long[] expectedWatermarks45Days = {16065L, 16110L, 16155L, 16200L, 16245L, 16290L, 16335L, 16380L};
@@ -709,15 +782,18 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
 
     String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(MULTI_LEVEL_CONCAT_TEST_TABLE);
     int numTasks = 0;
-    for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
-        tasks != null; tasks =
-        _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
+    List<String> taskList;
+    for (String tasks =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        _taskManager.scheduleAllTasksForTable(offlineTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
       assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
-      assertNull(
-          _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
+      assertNull(_taskManager.scheduleAllTasksForTable(offlineTableName, null)
+          .get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
       waitForTaskToComplete();
 
       // Check watermark
@@ -750,7 +826,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
       TestUtils.waitForCondition(aVoid -> {
         try {
           // Check total doc of merged segments are the same as the original segments
-          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          JsonNode actualJson = postQuery(sqlQuery);
           if (!SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery)) {
             return false;
           }
@@ -765,10 +841,10 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     // Check total tasks
     assertEquals(numTasks, 8);
 
-    assertTrue(_controllerStarter.getControllerMetrics()
-        .containsGauge("mergeRollupTaskDelayInNumBuckets.myTable3_OFFLINE.45days"));
-    assertTrue(_controllerStarter.getControllerMetrics()
-        .containsGauge("mergeRollupTaskDelayInNumBuckets.myTable3_OFFLINE.90days"));
+    assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+        "mergeRollupTaskDelayInNumBuckets.myTable3_OFFLINE.45days"));
+    assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+        "mergeRollupTaskDelayInNumBuckets.myTable3_OFFLINE.90days"));
   }
 
   protected void verifyTableDelete(String tableNameWithType) {
@@ -778,8 +854,8 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
         return false;
       }
       // Check if the task metadata is cleaned up
-      if (MinionTaskMetadataUtils
-          .fetchTaskMetadata(_propertyStore, MinionConstants.MergeRollupTask.TASK_TYPE, tableNameWithType) != null) {
+      if (MinionTaskMetadataUtils.fetchTaskMetadata(_propertyStore, MinionConstants.MergeRollupTask.TASK_TYPE,
+          tableNameWithType) != null) {
         return false;
       }
       return true;
@@ -829,7 +905,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     String tableName = getTableName();
 
     String sqlQuery = "SELECT count(*) FROM " + tableName; // 115545 rows for the test table
-    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery);
     // disable some checks for now because github does not generate the same number of tasks sometimes
     // need to figure out why they work locally all the time but not on github
     // I feel it maybe related to resources or timestamps
@@ -838,16 +914,19 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     long expectedWatermark = 16000 * 86_400_000L;
     String realtimeTableName = TableNameBuilder.REALTIME.tableNameWithType(tableName);
     int numTasks = 0;
-    for (String tasks = taskManager.scheduleTasks(realtimeTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
-        tasks != null; tasks =
-        taskManager.scheduleTasks(realtimeTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
+    List<String> taskList;
+    for (String tasks =
+        taskManager.scheduleAllTasksForTable(realtimeTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        taskManager.scheduleAllTasksForTable(realtimeTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
 //      assertEquals(helixTaskResourceManager.getSubtaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
       assertTrue(helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
 
       // Will not schedule task if there's incomplete task
-      assertNull(
-          taskManager.scheduleTasks(realtimeTableName).get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
+      assertNull(taskManager.scheduleAllTasksForTable(realtimeTableName, null)
+          .get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
       waitForTaskToComplete();
 
       // Check watermark
@@ -874,7 +953,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
       TestUtils.waitForCondition(aVoid -> {
         try {
           // Check num total doc of merged segments are the same as the original segments
-          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          JsonNode actualJson = postQuery(sqlQuery);
           if (!SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery)) {
             return false;
           }
@@ -892,8 +971,113 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     // Check total tasks
     assertEquals(numTasks, 5);
 
-    assertTrue(_controllerStarter.getControllerMetrics()
-        .containsGauge("mergeRollupTaskDelayInNumBuckets.myTable5_REALTIME.100days"));
+    assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+        "mergeRollupTaskDelayInNumBuckets.myTable5_REALTIME.100days"));
+
+    // Drop the table
+    dropRealtimeTable(tableName);
+
+    // Check if the task metadata is cleaned up on table deletion
+    verifyTableDelete(realtimeTableName);
+  }
+
+  @Test
+  public void testRealtimeTableProcessAllModeMultiLevelConcat()
+      throws Exception {
+    // The original segments (time range: [16251, 16428]):
+    // mytable__0__0__{ts00} ... mytable__0__11__{ts011}
+    // mytable__1__0__{ts00} ... mytable__1__11__{ts111}
+    //
+    // Scheduled time ranges and number buckets to process:
+    // round  |        100days          200days
+    //   1    | [16251, 16299], 3  |       []       , 0
+    //   2    | [16300, 16399], 2  |       []       , 0
+    //   3    | [16400, 16428], 1  |  [16251, 16399], 1
+    //   4    |       []      , 0  |  [16400, 16428], 1
+    //
+    // Upload historical segments manually:
+    // myTable_16071_16101_0
+    // myTable_16102_16129_1
+    // myTable_16130_16159_2
+    // myTable_16160_16189_3
+    // myTable_16190_16220_4
+    // myTable_16221_16250_5
+    //
+    // Scheduled time ranges and number buckets to process:
+    // round  |        100days          200days
+    //   5    | [16071, 16099], 3  |       []       , 0
+    //   6    | [16100, 16199], 2  |       []       , 0
+    //   7    | [16200, 16299], 1  |  [16071, 16199], 1
+    //   8    |       []      , 0  |  [16200, 16399], 1
+    PinotHelixTaskResourceManager helixTaskResourceManager = _controllerStarter.getHelixTaskResourceManager();
+    PinotTaskManager taskManager = _controllerStarter.getTaskManager();
+    String tableName = MULTI_LEVEL_CONCAT_PROCESS_ALL_REALTIME_TABLE;
+
+    String sqlQuery = "SELECT count(*) FROM " + tableName;
+    JsonNode expectedJson = postQuery(sqlQuery);
+    long[] expectedNumBucketsToProcess100Days = {3, 2, 1, 0, 3, 2, 1, 0};
+    long[] expectedNumBucketsToProcess200Days = {0, 0, 1, 1, 0, 0, 1, 1};
+    String realtimeTableName = TableNameBuilder.REALTIME.tableNameWithType(tableName);
+    int numTasks = 0;
+    List<String> taskList;
+    for (String tasks =
+        taskManager.scheduleAllTasksForTable(realtimeTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        taskManager.scheduleAllTasksForTable(realtimeTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
+      assertTrue(helixTaskResourceManager.getTaskQueues()
+          .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
+
+      // Will not schedule task if there's incomplete task
+      assertNull(taskManager.scheduleAllTasksForTable(realtimeTableName, null)
+          .get(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE));
+      waitForTaskToComplete();
+
+      // Check not using watermarks
+      ZNRecord minionTaskMetadataZNRecord = taskManager.getClusterInfoAccessor()
+          .getMinionTaskMetadataZNRecord(MinionConstants.MergeRollupTask.TASK_TYPE, realtimeTableName);
+      assertNull(minionTaskMetadataZNRecord);
+
+      // Check metrics
+      assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+          "mergeRollupTaskNumBucketsToProcess.myTable6_REALTIME.100days"));
+      assertTrue(MetricValueUtils.gaugeExists(_controllerStarter.getControllerMetrics(),
+          "mergeRollupTaskNumBucketsToProcess.myTable6_REALTIME.200days"));
+      long numBucketsToProcess = MetricValueUtils.getGaugeValue(_controllerStarter.getControllerMetrics(),
+          "mergeRollupTaskNumBucketsToProcess.myTable6_REALTIME.100days");
+      assertEquals(numBucketsToProcess, expectedNumBucketsToProcess100Days[numTasks]);
+      numBucketsToProcess = MetricValueUtils.getGaugeValue(_controllerStarter.getControllerMetrics(),
+          "mergeRollupTaskNumBucketsToProcess.myTable6_REALTIME.200days");
+      assertEquals(numBucketsToProcess, expectedNumBucketsToProcess200Days[numTasks]);
+    }
+    // Check total tasks
+    assertEquals(numTasks, 4);
+
+    // Check query results
+    JsonNode actualJson = postQuery(sqlQuery);
+    assertTrue(SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery));
+
+    // Upload historical data and schedule
+    uploadSegments(MULTI_LEVEL_CONCAT_PROCESS_ALL_REALTIME_TABLE, TableType.REALTIME, _tarDir5);
+    waitForAllDocsLoaded(600_000L);
+
+    for (String tasks =
+        taskManager.scheduleAllTasksForTable(realtimeTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE)
+            .get(0); tasks != null; taskList =
+        taskManager.scheduleAllTasksForTable(realtimeTableName, null).get(MinionConstants.MergeRollupTask.TASK_TYPE),
+        tasks = taskList != null ? taskList.get(0) : null, numTasks++) {
+      waitForTaskToComplete();
+      // Check metrics
+      long numBucketsToProcess = MetricValueUtils.getGaugeValue(_controllerStarter.getControllerMetrics(),
+          "mergeRollupTaskNumBucketsToProcess.myTable6_REALTIME.100days");
+      assertEquals(numBucketsToProcess, expectedNumBucketsToProcess100Days[numTasks]);
+      numBucketsToProcess = MetricValueUtils.getGaugeValue(_controllerStarter.getControllerMetrics(),
+          "mergeRollupTaskNumBucketsToProcess.myTable6_REALTIME.200days");
+      assertEquals(numBucketsToProcess, expectedNumBucketsToProcess200Days[numTasks]);
+    }
+
+    // Check total tasks
+    assertEquals(numTasks, 8);
 
     // Drop the table
     dropRealtimeTable(tableName);

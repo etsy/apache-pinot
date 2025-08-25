@@ -20,24 +20,21 @@ package org.apache.pinot.query;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.CompletableFuture;
 import org.apache.helix.HelixManager;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metrics.ServerMetrics;
-import org.apache.pinot.common.utils.NamedThreadFactory;
 import org.apache.pinot.common.utils.SchemaUtils;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
+import org.apache.pinot.query.routing.StagePlan;
+import org.apache.pinot.query.routing.WorkerMetadata;
 import org.apache.pinot.query.runtime.QueryRunner;
-import org.apache.pinot.query.runtime.executor.OpChainSchedulerService;
-import org.apache.pinot.query.runtime.executor.RoundRobinScheduler;
-import org.apache.pinot.query.runtime.plan.DistributedStagePlan;
-import org.apache.pinot.query.service.QueryConfig;
 import org.apache.pinot.query.testutils.MockInstanceDataManagerFactory;
 import org.apache.pinot.query.testutils.QueryTestUtils;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -61,35 +58,21 @@ import static org.mockito.Mockito.when;
  * multi-stage query communication.
  */
 public class QueryServerEnclosure {
-  private static final int DEFAULT_EXECUTOR_THREAD_NUM = 5;
   private static final String TABLE_CONFIGS_PREFIX = "/CONFIGS/TABLE/";
   private static final String SCHEMAS_PREFIX = "/SCHEMAS/";
 
-  private final OpChainSchedulerService _scheduler;
   private final int _queryRunnerPort;
-  private final Map<String, Object> _runnerConfig = new HashMap<>();
-  private final InstanceDataManager _instanceDataManager;
-  private final HelixManager _helixManager;
-
-  private QueryRunner _queryRunner;
+  private final QueryRunner _queryRunner;
 
   public QueryServerEnclosure(MockInstanceDataManagerFactory factory) {
-    try {
-      _instanceDataManager = factory.buildInstanceDataManager();
-      _helixManager = mockHelixManager(factory.buildSchemaMap());
-      _queryRunnerPort = QueryTestUtils.getAvailablePort();
-      _runnerConfig.put(QueryConfig.KEY_OF_QUERY_RUNNER_PORT, _queryRunnerPort);
-      _runnerConfig.put(QueryConfig.KEY_OF_QUERY_RUNNER_HOSTNAME,
-          String.format("Server_%s", QueryConfig.DEFAULT_QUERY_RUNNER_HOSTNAME));
-      _runnerConfig.put(QueryConfig.KEY_OF_SCHEDULER_RELEASE_TIMEOUT_MS, 100);
-      _queryRunner = new QueryRunner();
-      _scheduler = new OpChainSchedulerService(new RoundRobinScheduler(),
-          Executors.newFixedThreadPool(
-              DEFAULT_EXECUTOR_THREAD_NUM,
-              new NamedThreadFactory("test_query_server_enclosure_on_" + _queryRunnerPort + "_port")));
-    } catch (Exception e) {
-      throw new RuntimeException("Test Failed!", e);
-    }
+    _queryRunnerPort = QueryTestUtils.getAvailablePort();
+    Map<String, Object> runnerConfig = new HashMap<>();
+    runnerConfig.put(CommonConstants.MultiStageQueryRunner.KEY_OF_QUERY_RUNNER_HOSTNAME, "Server_localhost");
+    runnerConfig.put(CommonConstants.MultiStageQueryRunner.KEY_OF_QUERY_RUNNER_PORT, _queryRunnerPort);
+    InstanceDataManager instanceDataManager = factory.buildInstanceDataManager();
+    HelixManager helixManager = mockHelixManager(factory.buildSchemaMap());
+    _queryRunner = new QueryRunner();
+    _queryRunner.init(new PinotConfiguration(runnerConfig), instanceDataManager, helixManager, mockServiceMetrics());
   }
 
   private HelixManager mockHelixManager(Map<String, Schema> schemaMap) {
@@ -119,25 +102,17 @@ public class QueryServerEnclosure {
     return _queryRunnerPort;
   }
 
-  public void start()
-      throws Exception {
-    PinotConfiguration configuration = new PinotConfiguration(_runnerConfig);
-    _queryRunner = new QueryRunner();
-    _queryRunner.init(configuration, _instanceDataManager, _helixManager, mockServiceMetrics());
+  public void start() {
     _queryRunner.start();
-    _scheduler.startAsync().awaitRunning();
   }
 
   public void shutDown() {
-    try {
-      _queryRunner.shutDown();
-      _scheduler.stopAsync().awaitTerminated();
-    } catch (TimeoutException e) {
-      throw new RuntimeException(e);
-    }
+    _queryRunner.shutDown();
   }
 
-  public void processQuery(DistributedStagePlan distributedStagePlan, Map<String, String> requestMetadataMap) {
-    _queryRunner.processQuery(distributedStagePlan, requestMetadataMap);
+  public CompletableFuture<Void> processQuery(WorkerMetadata workerMetadata, StagePlan stagePlan,
+      Map<String, String> requestMetadataMap) {
+    return CompletableFuture.runAsync(() -> _queryRunner.processQuery(workerMetadata, stagePlan, requestMetadataMap),
+        _queryRunner.getExecutorService());
   }
 }

@@ -20,19 +20,14 @@ package org.apache.pinot.query.runtime.operator.exchange;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
-import java.util.Iterator;
 import java.util.List;
-import java.util.function.BiFunction;
 import org.apache.pinot.common.datablock.DataBlock;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
-import org.apache.pinot.query.mailbox.MailboxIdentifier;
-import org.apache.pinot.query.mailbox.MailboxService;
 import org.apache.pinot.query.mailbox.SendingMailbox;
-import org.apache.pinot.query.mailbox.StringMailboxIdentifier;
 import org.apache.pinot.query.runtime.blocks.BlockSplitter;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
-import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
+import org.apache.pinot.query.runtime.blocks.TransferableBlockTestUtils;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
@@ -42,26 +37,20 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import static org.mockito.Mockito.when;
+
 
 public class BlockExchangeTest {
-
-  private static final MailboxIdentifier MAILBOX_1 = new StringMailboxIdentifier("1:host:1:host:1");
-  private static final MailboxIdentifier MAILBOX_2 = new StringMailboxIdentifier("1:host:1:host:2");
-
   private AutoCloseable _mocks;
 
   @Mock
-  private MailboxService<TransferableBlock> _mailboxService;
+  private SendingMailbox _mailbox1;
   @Mock
-  private SendingMailbox<TransferableBlock> _mailbox1;
-  @Mock
-  private SendingMailbox<TransferableBlock> _mailbox2;
+  private SendingMailbox _mailbox2;
 
   @BeforeMethod
   public void setUp() {
     _mocks = MockitoAnnotations.openMocks(this);
-    Mockito.when(_mailboxService.getSendingMailbox(MAILBOX_1)).thenReturn(_mailbox1);
-    Mockito.when(_mailboxService.getSendingMailbox(MAILBOX_2)).thenReturn(_mailbox2);
   }
 
   @AfterMethod
@@ -71,17 +60,14 @@ public class BlockExchangeTest {
   }
 
   @Test
-  public void shouldSendEosBlockToAllDestinations() {
+  public void shouldSendEosBlockToAllDestinations()
+      throws Exception {
     // Given:
-    List<MailboxIdentifier> destinations = ImmutableList.of(MAILBOX_1, MAILBOX_2);
-    BlockExchange exchange = new TestBlockExchange(
-        _mailboxService,
-        destinations,
-        (dest, block) -> Iterators.singletonIterator(new BlockExchange.RoutedBlock(MAILBOX_1, block))
-    );
+    List<SendingMailbox> destinations = ImmutableList.of(_mailbox1, _mailbox2);
+    BlockExchange exchange = new TestBlockExchange(destinations);
 
     // When:
-    exchange.send(TransferableBlockUtils.getEndOfStreamTransferableBlock());
+    exchange.send(TransferableBlockTestUtils.getEndOfStreamTransferableBlock(0));
 
     // Then:
     ArgumentCaptor<TransferableBlock> captor = ArgumentCaptor.forClass(TransferableBlock.class);
@@ -96,14 +82,11 @@ public class BlockExchangeTest {
   }
 
   @Test
-  public void shouldSendDataBlocksOnlyToTargetDestination() {
+  public void shouldSendDataBlocksOnlyToTargetDestination()
+      throws Exception {
     // Given:
-    List<MailboxIdentifier> destinations = ImmutableList.of(MAILBOX_1, MAILBOX_2);
-    BlockExchange exchange = new TestBlockExchange(
-        _mailboxService,
-        destinations,
-        (dest, block) -> Iterators.singletonIterator(new BlockExchange.RoutedBlock(MAILBOX_1, block))
-    );
+    List<SendingMailbox> destinations = ImmutableList.of(_mailbox1);
+    BlockExchange exchange = new TestBlockExchange(destinations);
     TransferableBlock block = new TransferableBlock(ImmutableList.of(new Object[]{"val"}),
         new DataSchema(new String[]{"foo"}, new ColumnDataType[]{ColumnDataType.STRING}), DataBlock.Type.ROW);
 
@@ -119,27 +102,55 @@ public class BlockExchangeTest {
   }
 
   @Test
-  public void shouldSplitBlocks() {
+  public void shouldSignalEarlyTerminationProperly()
+      throws Exception {
     // Given:
-    List<MailboxIdentifier> destinations = ImmutableList.of(MAILBOX_1, MAILBOX_2);
+    List<SendingMailbox> destinations = ImmutableList.of(_mailbox1, _mailbox2);
+    BlockExchange exchange = new TestBlockExchange(destinations);
+    TransferableBlock block = new TransferableBlock(ImmutableList.of(new Object[]{"val"}),
+        new DataSchema(new String[]{"foo"}, new ColumnDataType[]{ColumnDataType.STRING}), DataBlock.Type.ROW);
+
+    // When send normal block and some mailbox has terminated
+    when(_mailbox1.isEarlyTerminated()).thenReturn(true);
+    boolean isEarlyTerminated = exchange.send(block);
+
+    // Then:
+    Assert.assertFalse(isEarlyTerminated);
+
+    // When send normal block and both terminated
+    when(_mailbox2.isTerminated()).thenReturn(true);
+    isEarlyTerminated = exchange.send(block);
+
+    // Then:
+    Assert.assertFalse(isEarlyTerminated);
+
+    // When send metadata block
+    when(_mailbox2.isEarlyTerminated()).thenReturn(true);
+    isEarlyTerminated = exchange.send(block);
+
+    // Then:
+    Assert.assertTrue(isEarlyTerminated);
+  }
+
+  @Test
+  public void shouldSplitBlocks()
+      throws Exception {
+    // Given:
+    List<SendingMailbox> destinations = ImmutableList.of(_mailbox1);
 
     DataSchema schema = new DataSchema(new String[]{"foo"}, new ColumnDataType[]{ColumnDataType.STRING});
 
-    TransferableBlock inBlock = new TransferableBlock(
-        ImmutableList.of(new Object[]{"one"}, new Object[]{"two"}), schema, DataBlock.Type.ROW);
+    TransferableBlock inBlock =
+        new TransferableBlock(ImmutableList.of(new Object[]{"one"}, new Object[]{"two"}), schema, DataBlock.Type.ROW);
 
-    TransferableBlock outBlockOne = new TransferableBlock(
-        ImmutableList.of(new Object[]{"one"}), schema, DataBlock.Type.ROW);
+    TransferableBlock outBlockOne =
+        new TransferableBlock(ImmutableList.of(new Object[]{"one"}), schema, DataBlock.Type.ROW);
 
-    TransferableBlock outBlockTwo = new TransferableBlock(
-        ImmutableList.of(new Object[]{"two"}), schema, DataBlock.Type.ROW);
+    TransferableBlock outBlockTwo =
+        new TransferableBlock(ImmutableList.of(new Object[]{"two"}), schema, DataBlock.Type.ROW);
 
-    BlockExchange exchange = new TestBlockExchange(
-        _mailboxService,
-        destinations,
-        (dest, block) -> Iterators.singletonIterator(new BlockExchange.RoutedBlock(MAILBOX_1, block)),
-        (block, type, maxSize) -> ImmutableList.of(outBlockOne, outBlockTwo).iterator()
-    );
+    BlockExchange exchange = new TestBlockExchange(destinations,
+        (block, type, maxSize) -> ImmutableList.of(outBlockOne, outBlockTwo).iterator());
 
     // When:
     exchange.send(inBlock);
@@ -155,23 +166,20 @@ public class BlockExchangeTest {
   }
 
   private static class TestBlockExchange extends BlockExchange {
-
-    private final BiFunction<List<MailboxIdentifier>, TransferableBlock, Iterator<RoutedBlock>> _router;
-
-    protected TestBlockExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-        BiFunction<List<MailboxIdentifier>, TransferableBlock, Iterator<RoutedBlock>> router) {
-      this(mailbox, destinations, router, (block, type, size) -> Iterators.singletonIterator(block));
+    protected TestBlockExchange(List<SendingMailbox> destinations) {
+      this(destinations, (block, type, size) -> Iterators.singletonIterator(block));
     }
 
-    protected TestBlockExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-        BiFunction<List<MailboxIdentifier>, TransferableBlock, Iterator<RoutedBlock>> router, BlockSplitter splitter) {
-      super(mailbox, destinations, splitter);
-      _router = router;
+    protected TestBlockExchange(List<SendingMailbox> destinations, BlockSplitter splitter) {
+      super(destinations, splitter);
     }
 
     @Override
-    protected Iterator<RoutedBlock> route(List<MailboxIdentifier> destinations, TransferableBlock block) {
-      return _router.apply(destinations, block);
+    protected void route(List<SendingMailbox> destinations, TransferableBlock block)
+        throws Exception {
+      for (SendingMailbox mailbox : destinations) {
+        sendBlock(mailbox, block);
+      }
     }
   }
 }

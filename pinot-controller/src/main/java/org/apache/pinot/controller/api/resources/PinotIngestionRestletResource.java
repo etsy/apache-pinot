@@ -39,10 +39,12 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.container.Suspended;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.api.access.AccessType;
 import org.apache.pinot.controller.api.access.Authenticate;
@@ -50,6 +52,9 @@ import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.util.FileIngestionHelper;
 import org.apache.pinot.controller.util.FileIngestionHelper.DataPayload;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
@@ -62,6 +67,7 @@ import org.glassfish.jersey.server.ManagedAsync;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
@@ -87,9 +93,14 @@ import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_K
  * &sourceURIStr=s3://test.bucket/path/to/json/data/data.json
  *
  */
-@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotIngestionRestletResource {
 
@@ -123,6 +134,7 @@ public class PinotIngestionRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.MULTIPART_FORM_DATA)
   @Path("/ingestFromFile")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.INGEST_FILE)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Ingest a file", notes = "Creates a segment using given file and pushes it to Pinot. "
       + "\n All steps happen on the controller. This API is NOT meant for production environments/large input files. "
@@ -135,7 +147,8 @@ public class PinotIngestionRestletResource {
           String tableNameWithType, @ApiParam(value =
       "Batch config Map as json string. Must pass inputFormat, and optionally record reader properties. e.g. "
           + "{\"inputFormat\":\"json\"}", required = true) @QueryParam("batchConfigMapStr") String batchConfigMapStr,
-      FormDataMultiPart fileUpload, @Suspended final AsyncResponse asyncResponse) {
+      FormDataMultiPart fileUpload, @Suspended final AsyncResponse asyncResponse, @Context HttpHeaders headers) {
+    tableNameWithType = DatabaseUtils.translateTableName(tableNameWithType, headers);
     try {
       asyncResponse.resume(ingestData(tableNameWithType, batchConfigMapStr, new DataPayload(fileUpload)));
     } catch (IllegalArgumentException e) {
@@ -168,6 +181,7 @@ public class PinotIngestionRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.MULTIPART_FORM_DATA)
   @Path("/ingestFromURI")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.INGEST_FILE)
   @Authenticate(AccessType.CREATE)
   @ApiOperation(value = "Ingest from the given URI", notes =
       "Creates a segment using file at the given URI and pushes it to Pinot. "
@@ -185,7 +199,8 @@ public class PinotIngestionRestletResource {
       "Batch config Map as json string. Must pass inputFormat, and optionally input FS properties. e.g. "
           + "{\"inputFormat\":\"json\"}", required = true) @QueryParam("batchConfigMapStr") String batchConfigMapStr,
       @ApiParam(value = "URI of file to upload", required = true) @QueryParam("sourceURIStr") String sourceURIStr,
-      @Suspended final AsyncResponse asyncResponse) {
+      @Suspended final AsyncResponse asyncResponse, @Context HttpHeaders headers) {
+    tableNameWithType = DatabaseUtils.translateTableName(tableNameWithType, headers);
     try {
       asyncResponse.resume(ingestData(tableNameWithType, batchConfigMapStr, new DataPayload(new URI(sourceURIStr))));
     } catch (IllegalArgumentException e) {

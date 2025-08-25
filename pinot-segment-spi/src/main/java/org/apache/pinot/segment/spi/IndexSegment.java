@@ -72,9 +72,20 @@ public interface IndexSegment {
    */
   List<StarTreeV2> getStarTrees();
 
+  /**
+   * Returns a bitmap of the valid document ids. Valid document is the document that holds the latest timestamp (or
+   * largest comparison value) for the primary key for upsert enabled tables.
+   */
   // TODO(upsert): solve the coordination problems of getting validDoc across segments for result consistency
   @Nullable
   ThreadSafeMutableRoaringBitmap getValidDocIds();
+
+  /**
+   * Returns a bitmap of the queryable document ids. Queryable document is the document that holds the latest timestamp
+   * (or largest comparison value) for the primary key and is not deleted for upsert enabled tables.
+   */
+  @Nullable
+  ThreadSafeMutableRoaringBitmap getQueryableDocIds();
 
   /**
    * Returns the record for the given document id. Virtual column values are not returned.
@@ -118,6 +129,12 @@ public interface IndexSegment {
    */
   default void release(FetchContext fetchContext) {
   }
+
+  /**
+   * Offloads the segment from the metadata management (e.g. upsert metadata), but not releases the resources yet
+   * because there might be queries still accessing the segment.
+   */
+  void offload();
 
   /**
    * Destroys segment in memory and closes file handlers if in MMAP mode.

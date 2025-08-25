@@ -20,6 +20,7 @@ package org.apache.pinot.core.common.datablock;
 
 import com.google.common.collect.ImmutableList;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.pinot.common.datablock.ColumnarDataBlock;
@@ -29,15 +30,15 @@ import org.apache.pinot.common.datablock.RowDataBlock;
 import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 
 public class DataBlockTest {
-  private static final List<DataSchema.ColumnDataType> EXCLUDE_DATA_TYPES = ImmutableList.of(
-      DataSchema.ColumnDataType.OBJECT, DataSchema.ColumnDataType.JSON, DataSchema.ColumnDataType.BYTES,
-      DataSchema.ColumnDataType.BYTES_ARRAY);
+  private static final List<ColumnDataType> EXCLUDE_DATA_TYPES =
+      ImmutableList.of(ColumnDataType.OBJECT, ColumnDataType.JSON, ColumnDataType.BYTES, ColumnDataType.BYTES_ARRAY);
   private static final int TEST_ROW_COUNT = 5;
 
   @Test
@@ -55,16 +56,15 @@ public class DataBlockTest {
     // Assert processing exception and original exception both matches.
     String actual = dataBlock.getExceptions().get(QueryException.QUERY_EXECUTION_ERROR.getErrorCode());
     Assert.assertEquals(actual, expected);
-    Assert.assertTrue(dataBlock.getExceptions().get(QueryException.UNKNOWN_ERROR_CODE)
-        .contains(originalException.getMessage()));
+    Assert.assertTrue(
+        dataBlock.getExceptions().get(QueryException.UNKNOWN_ERROR_CODE).contains(originalException.getMessage()));
   }
 
   @Test(dataProvider = "testTypeNullPercentile")
   public void testAllDataTypes(int nullPercentile)
       throws Exception {
-
-    DataSchema.ColumnDataType[] allDataTypes = DataSchema.ColumnDataType.values();
-    List<DataSchema.ColumnDataType> columnDataTypes = new ArrayList<DataSchema.ColumnDataType>();
+    ColumnDataType[] allDataTypes = ColumnDataType.values();
+    List<ColumnDataType> columnDataTypes = new ArrayList<ColumnDataType>();
     List<String> columnNames = new ArrayList<String>();
     for (int i = 0; i < allDataTypes.length; i++) {
       if (!EXCLUDE_DATA_TYPES.contains(allDataTypes[i])) {
@@ -73,20 +73,21 @@ public class DataBlockTest {
       }
     }
 
-    DataSchema dataSchema = new DataSchema(columnNames.toArray(new String[]{}),
-        columnDataTypes.toArray(new DataSchema.ColumnDataType[]{}));
+    DataSchema dataSchema =
+        new DataSchema(columnNames.toArray(new String[]{}), columnDataTypes.toArray(new ColumnDataType[]{}));
     List<Object[]> rows = DataBlockTestUtils.getRandomRows(dataSchema, TEST_ROW_COUNT, nullPercentile);
     List<Object[]> columnars = DataBlockTestUtils.convertColumnar(dataSchema, rows);
     RowDataBlock rowBlock = DataBlockBuilder.buildFromRows(rows, dataSchema);
     ColumnarDataBlock columnarBlock = DataBlockBuilder.buildFromColumns(columnars, dataSchema);
 
     for (int colId = 0; colId < dataSchema.getColumnNames().length; colId++) {
-      DataSchema.ColumnDataType columnDataType = dataSchema.getColumnDataType(colId);
+      ColumnDataType columnDataType = dataSchema.getColumnDataType(colId);
       for (int rowId = 0; rowId < TEST_ROW_COUNT; rowId++) {
         Object rowVal = DataBlockTestUtils.getElement(rowBlock, rowId, colId, columnDataType);
         Object colVal = DataBlockTestUtils.getElement(columnarBlock, rowId, colId, columnDataType);
-        Assert.assertEquals(rowVal, colVal, "Error comparing Row/Column Block at (" + rowId + "," + colId + ")"
-            + " of Type: " + columnDataType + "! rowValue: [" + rowVal + "], columnarValue: [" + colVal + "]");
+        Assert.assertEquals(rowVal, colVal,
+            "Error comparing Row/Column Block at (" + rowId + "," + colId + ")" + " of Type: " + columnDataType
+                + "! rowValue: [" + rowVal + "], columnarValue: [" + colVal + "]");
       }
     }
   }
@@ -94,5 +95,33 @@ public class DataBlockTest {
   @DataProvider(name = "testTypeNullPercentile")
   public Object[][] provideTestTypeNullPercentile() {
     return new Object[][]{new Object[]{0}, new Object[]{10}, new Object[]{100}};
+  }
+
+  /**
+   * TODO: bytes array serialization probably needs fixing.
+   */
+  @Test(expectedExceptions = IllegalStateException.class, expectedExceptionsMessageRegExp = "Unsupported stored type:"
+      + " BYTES_ARRAY.*")
+  public void bytesArraySerDe()
+      throws Exception {
+    Object[] row = new Object[1];
+    row[0] = new byte[][]{new byte[]{0xD, 0xA}, new byte[]{0xD, 0xA}};
+    List<Object[]> rows = new ArrayList<>();
+    rows.add(row);
+    DataSchema dataSchema = new DataSchema(new String[]{"byteArray"}, new ColumnDataType[]{ColumnDataType.BYTES_ARRAY});
+    DataBlockBuilder.buildFromRows(rows, dataSchema);
+  }
+
+  @Test
+  public void intArraySerDe()
+      throws IOException {
+    Object[] row = new Object[1];
+    row[0] = new int[0];
+    List<Object[]> rows = new ArrayList<>();
+    rows.add(row);
+    DataSchema dataSchema = new DataSchema(new String[]{"intArray"}, new ColumnDataType[]{ColumnDataType.INT_ARRAY});
+    DataBlock dataBlock = DataBlockBuilder.buildFromRows(rows, dataSchema);
+    int[] intArray = DataBlockUtils.getDataBlock(ByteBuffer.wrap(dataBlock.toBytes())).getIntArray(0, 0);
+    Assert.assertEquals(intArray.length, 0);
   }
 }

@@ -18,9 +18,15 @@
  */
 package org.apache.pinot.controller.helix.core.minion.generator;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.task.JobConfig;
+import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.controller.api.exception.UnknownTaskTypeException;
 import org.apache.pinot.controller.helix.core.minion.ClusterInfoAccessor;
 import org.apache.pinot.core.common.MinionConstants;
@@ -31,8 +37,8 @@ import org.slf4j.LoggerFactory;
 
 
 /**
- * Base implementation of the {@link PinotTaskGenerator} which reads the 'taskTimeoutMs' and
- * 'numConcurrentTasksPerInstance' from the cluster config.
+ * Base implementation of the {@link PinotTaskGenerator} which reads the 'taskTimeoutMs',
+ * 'numConcurrentTasksPerInstance' and 'maxAttemptsPerTask' from the cluster config.
  */
 public abstract class BaseTaskGenerator implements PinotTaskGenerator {
   protected static final Logger LOGGER = LoggerFactory.getLogger(BaseTaskGenerator.class);
@@ -75,8 +81,64 @@ public abstract class BaseTaskGenerator implements PinotTaskGenerator {
   }
 
   @Override
+  public int getMaxAttemptsPerTask() {
+    String taskType = getTaskType();
+    String configKey = taskType + MinionConstants.MAX_ATTEMPTS_PER_TASK_KEY_SUFFIX;
+    String configValue = _clusterInfoAccessor.getClusterConfig(configKey);
+    if (configValue != null) {
+      try {
+        return Integer.parseInt(configValue);
+      } catch (Exception e) {
+        LOGGER.error("Invalid config {}: '{}'", configKey, configValue, e);
+      }
+    }
+    return MinionConstants.DEFAULT_MAX_ATTEMPTS_PER_TASK;
+  }
+
+  /**
+   * Returns the list of segment zk metadata for available segments in the table. The list does NOT filter out inactive
+   * segments based on the lineage. In order to compute the valid segments, we look at both idealstate and segment
+   * zk metadata in the property store and compute the intersection. In this way, we can avoid picking the dangling
+   * segments.
+   *
+   * @param tableNameWithType
+   * @return the list of segment zk metadata for available segments in the table.
+   */
+  public List<SegmentZKMetadata> getSegmentsZKMetadataForTable(String tableNameWithType) {
+    IdealState idealState = _clusterInfoAccessor.getIdealState(tableNameWithType);
+    Set<String> segmentsForTable = idealState.getPartitionSet();
+    List<SegmentZKMetadata> segmentZKMetadataList = _clusterInfoAccessor.getSegmentsZKMetadata(tableNameWithType);
+    List<SegmentZKMetadata> selectedSegmentZKMetadataList = new ArrayList<>();
+    for (SegmentZKMetadata segmentZKMetadata : segmentZKMetadataList) {
+      if (segmentsForTable.contains(segmentZKMetadata.getSegmentName())) {
+        selectedSegmentZKMetadataList.add(segmentZKMetadata);
+      }
+    }
+    return selectedSegmentZKMetadataList;
+  }
+
+  @Override
   public List<PinotTaskConfig> generateTasks(TableConfig tableConfig, Map<String, String> taskConfigs)
       throws Exception {
     throw new UnknownTaskTypeException("Adhoc task generation is not supported for task type - " + this.getTaskType());
+  }
+
+  @Override
+  public void generateTasks(List<TableConfig> tableConfigs, List<PinotTaskConfig> pinotTaskConfigs)
+      throws Exception {
+    pinotTaskConfigs.addAll(generateTasks(tableConfigs));
+  }
+
+  @Override
+  public String getMinionInstanceTag(TableConfig tableConfig) {
+    return TaskGeneratorUtils.extractMinionInstanceTag(tableConfig, getTaskType());
+  }
+
+  public Map<String, String> getBaseTaskConfigs(TableConfig tableConfig, List<String> segmentNames) {
+    Map<String, String> baseConfigs = new HashMap<>();
+    baseConfigs.put(MinionConstants.TABLE_NAME_KEY, tableConfig.getTableName());
+    baseConfigs.put(MinionConstants.SEGMENT_NAME_KEY, StringUtils.join(segmentNames,
+          MinionConstants.SEGMENT_NAME_SEPARATOR));
+    return baseConfigs;
   }
 }

@@ -23,19 +23,25 @@ import com.google.common.collect.ImmutableMap;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Broker.Request.QueryOptionKey;
-import org.apache.pinot.spi.utils.CommonConstants.Broker.Request.QueryOptionValue;
+import org.apache.pinot.spi.utils.CommonConstants.MultiStageQueryRunner.JoinOverFlowMode;
+import org.apache.pinot.spi.utils.CommonConstants.MultiStageQueryRunner.WindowOverFlowMode;
 
 
 /**
  * Utils to parse query options.
  */
 public class QueryOptionsUtils {
+
   private QueryOptionsUtils() {
   }
-
 
   private static final Map<String, String> CONFIG_RESOLVER;
   private static final RuntimeException CLASS_LOAD_ERROR;
@@ -101,6 +107,30 @@ public class QueryOptionsUtils {
     }
   }
 
+  @Nullable
+  public static Long getMaxServerResponseSizeBytes(Map<String, String> queryOptions) {
+    String responseSize = queryOptions.get(QueryOptionKey.MAX_SERVER_RESPONSE_SIZE_BYTES);
+    if (responseSize != null) {
+      long maxSize = Long.parseLong(responseSize);
+      Preconditions.checkState(maxSize > 0, "maxServerResponseSize must be positive. got %s", maxSize);
+      return maxSize;
+    }
+
+    return null;
+  }
+
+  @Nullable
+  public static Long getMaxQueryResponseSizeBytes(Map<String, String> queryOptions) {
+    String responseSize = queryOptions.get(QueryOptionKey.MAX_QUERY_RESPONSE_SIZE_BYTES);
+    if (responseSize != null) {
+      long maxSize = Long.parseLong(responseSize);
+      Preconditions.checkState(maxSize > 0, "maxQueryResponseSize must be positive. got %s", maxSize);
+      return maxSize;
+    }
+
+    return null;
+  }
+
   public static boolean isAndScanReorderingEnabled(Map<String, String> queryOptions) {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.AND_SCAN_REORDERING));
   }
@@ -109,17 +139,59 @@ public class QueryOptionsUtils {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SKIP_UPSERT));
   }
 
+  public static boolean isSkipUpsertView(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SKIP_UPSERT_VIEW));
+  }
+
+  public static long getUpsertViewFreshnessMs(Map<String, String> queryOptions) {
+    String freshnessMsString = queryOptions.get(QueryOptionKey.UPSERT_VIEW_FRESHNESS_MS);
+    return freshnessMsString != null ? Long.parseLong(freshnessMsString) : -1;
+  }
+
+  public static boolean isScanStarTreeNodes(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SCAN_STAR_TREE_NODES));
+  }
+
   public static boolean isSkipStarTree(Map<String, String> queryOptions) {
     return "false".equalsIgnoreCase(queryOptions.get(QueryOptionKey.USE_STAR_TREE));
   }
 
-  public static boolean isRoutingForceHLC(Map<String, String> queryOptions) {
-    String routingOptions = queryOptions.get(QueryOptionKey.ROUTING_OPTIONS);
-    return routingOptions != null && routingOptions.toUpperCase().contains(QueryOptionValue.ROUTING_FORCE_HLC);
-  }
-
   public static boolean isSkipScanFilterReorder(Map<String, String> queryOptions) {
     return "false".equalsIgnoreCase(queryOptions.get(QueryOptionKey.USE_SCAN_REORDER_OPTIMIZATION));
+  }
+
+  @Nullable
+  public static Map<String, Set<FieldConfig.IndexType>> getSkipIndexes(Map<String, String> queryOptions) {
+    // Example config:  skipIndexes='col1=inverted,range&col2=inverted'
+    String skipIndexesStr = queryOptions.get(QueryOptionKey.SKIP_INDEXES);
+    if (skipIndexesStr == null) {
+      return null;
+    }
+
+    String[] perColumnIndexSkip = StringUtils.split(skipIndexesStr, '&');
+    Map<String, Set<FieldConfig.IndexType>> skipIndexes = new HashMap<>();
+    for (String columnConf : perColumnIndexSkip) {
+      String[] conf = StringUtils.split(columnConf, '=');
+      if (conf.length != 2) {
+        throw new RuntimeException("Invalid format for " + QueryOptionKey.SKIP_INDEXES
+            + ". Example of valid format: SET skipIndexes='col1=inverted,range&col2=inverted'");
+      }
+      String columnName = conf[0];
+      String[] indexTypes = StringUtils.split(conf[1], ',');
+
+      for (String indexType : indexTypes) {
+        skipIndexes.computeIfAbsent(columnName, k -> new HashSet<>())
+            .add(FieldConfig.IndexType.valueOf(indexType.toUpperCase()));
+      }
+    }
+
+    return skipIndexes;
+  }
+
+  @Nullable
+  public static Boolean isUseFixedReplica(Map<String, String> queryOptions) {
+    String useFixedReplica = queryOptions.get(CommonConstants.Broker.Request.QueryOptionKey.USE_FIXED_REPLICA);
+    return useFixedReplica != null ? Boolean.parseBoolean(useFixedReplica) : null;
   }
 
   @Nullable
@@ -130,6 +202,10 @@ public class QueryOptionsUtils {
 
   public static boolean isExplainPlanVerbose(Map<String, String> queryOptions) {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.EXPLAIN_PLAN_VERBOSE));
+  }
+
+  public static boolean isUseMultistageEngine(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.USE_MULTISTAGE_ENGINE));
   }
 
   @Nullable
@@ -150,6 +226,12 @@ public class QueryOptionsUtils {
     return minServerGroupTrimSizeString != null ? Integer.parseInt(minServerGroupTrimSizeString) : null;
   }
 
+  @Nullable
+  public static Integer getMinBrokerGroupTrimSize(Map<String, String> queryOptions) {
+    String minBrokerGroupTrimSizeString = queryOptions.get(QueryOptionKey.MIN_BROKER_GROUP_TRIM_SIZE);
+    return minBrokerGroupTrimSizeString != null ? Integer.parseInt(minBrokerGroupTrimSizeString) : null;
+  }
+
   public static boolean isNullHandlingEnabled(Map<String, String> queryOptions) {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.ENABLE_NULL_HANDLING));
   }
@@ -158,8 +240,74 @@ public class QueryOptionsUtils {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SERVER_RETURN_FINAL_RESULT));
   }
 
+  public static boolean isServerReturnFinalResultKeyUnpartitioned(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SERVER_RETURN_FINAL_RESULT_KEY_UNPARTITIONED));
+  }
+
   @Nullable
   public static String getOrderByAlgorithm(Map<String, String> queryOptions) {
     return queryOptions.get(QueryOptionKey.ORDER_BY_ALGORITHM);
+  }
+
+  @Nullable
+  public static Integer getMultiStageLeafLimit(Map<String, String> queryOptions) {
+    String maxLeafLimitStr = queryOptions.get(QueryOptionKey.MULTI_STAGE_LEAF_LIMIT);
+    return maxLeafLimitStr != null ? Integer.parseInt(maxLeafLimitStr) : null;
+  }
+
+  @Nullable
+  public static Integer getNumGroupsLimit(Map<String, String> queryOptions) {
+    String maxNumGroupLimit = queryOptions.get(QueryOptionKey.NUM_GROUPS_LIMIT);
+    return maxNumGroupLimit != null ? Integer.parseInt(maxNumGroupLimit) : null;
+  }
+
+  @Nullable
+  public static Integer getMaxInitialResultHolderCapacity(Map<String, String> queryOptions) {
+    String maxInitResultCap = queryOptions.get(QueryOptionKey.MAX_INITIAL_RESULT_HOLDER_CAPACITY);
+    return maxInitResultCap != null ? Integer.parseInt(maxInitResultCap) : null;
+  }
+
+  @Nullable
+  public static Integer getGroupTrimThreshold(Map<String, String> queryOptions) {
+    String groupByTrimThreshold = queryOptions.get(QueryOptionKey.GROUP_TRIM_THRESHOLD);
+    return groupByTrimThreshold != null ? Integer.parseInt(groupByTrimThreshold) : null;
+  }
+
+  public static boolean shouldDropResults(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(CommonConstants.Broker.Request.QueryOptionKey.DROP_RESULTS));
+  }
+
+  @Nullable
+  public static Integer getMaxStreamingPendingBlocks(Map<String, String> queryOptions) {
+    String maxStreamingPendingBlocks = queryOptions.get(QueryOptionKey.MAX_STREAMING_PENDING_BLOCKS);
+    return maxStreamingPendingBlocks != null ? Integer.parseInt(maxStreamingPendingBlocks) : null;
+  }
+
+  @Nullable
+  public static Integer getMaxRowsInJoin(Map<String, String> queryOptions) {
+    String maxRowsInJoin = queryOptions.get(QueryOptionKey.MAX_ROWS_IN_JOIN);
+    return maxRowsInJoin != null ? Integer.parseInt(maxRowsInJoin) : null;
+  }
+
+  @Nullable
+  public static JoinOverFlowMode getJoinOverflowMode(Map<String, String> queryOptions) {
+    String joinOverflowModeStr = queryOptions.get(QueryOptionKey.JOIN_OVERFLOW_MODE);
+    return joinOverflowModeStr != null ? JoinOverFlowMode.valueOf(joinOverflowModeStr) : null;
+  }
+
+  @Nullable
+  public static Integer getMaxRowsInWindow(Map<String, String> queryOptions) {
+    String maxRowsInWindow = queryOptions.get(QueryOptionKey.MAX_ROWS_IN_WINDOW);
+    return maxRowsInWindow != null ? Integer.parseInt(maxRowsInWindow) : null;
+  }
+
+  @Nullable
+  public static WindowOverFlowMode getWindowOverflowMode(Map<String, String> queryOptions) {
+    String windowOverflowModeStr = queryOptions.get(QueryOptionKey.WINDOW_OVERFLOW_MODE);
+    return windowOverflowModeStr != null ? WindowOverFlowMode.valueOf(windowOverflowModeStr) : null;
+  }
+
+  public static boolean isSkipUnavailableServers(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SKIP_UNAVAILABLE_SERVERS));
   }
 }

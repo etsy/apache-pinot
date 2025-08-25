@@ -19,9 +19,10 @@
 package org.apache.pinot.segment.spi.index.reader;
 
 import it.unimi.dsi.fastutil.ints.IntSet;
-import java.io.Closeable;
 import java.math.BigDecimal;
 import java.util.Arrays;
+import java.util.List;
+import org.apache.pinot.segment.spi.index.IndexReader;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.ByteArray;
 
@@ -31,7 +32,7 @@ import org.apache.pinot.spi.utils.ByteArray;
  * supported. Type conversion between STRING and BYTES via Hex encoding/decoding should be supported.
  */
 @SuppressWarnings("rawtypes")
-public interface Dictionary extends Closeable {
+public interface Dictionary extends IndexReader {
   int NULL_VALUE_INDEX = -1;
 
   /**
@@ -207,7 +208,19 @@ public interface Dictionary extends Closeable {
     }
   }
 
+  default void readIntValues(int[] dictIds, int length, Integer[] outValues) {
+    for (int i = 0; i < length; i++) {
+      outValues[i] = getIntValue(dictIds[i]);
+    }
+  }
+
   default void readLongValues(int[] dictIds, int length, long[] outValues) {
+    for (int i = 0; i < length; i++) {
+      outValues[i] = getLongValue(dictIds[i]);
+    }
+  }
+
+  default void readLongValues(int[] dictIds, int length, Long[] outValues) {
     for (int i = 0; i < length; i++) {
       outValues[i] = getLongValue(dictIds[i]);
     }
@@ -219,7 +232,19 @@ public interface Dictionary extends Closeable {
     }
   }
 
+  default void readFloatValues(int[] dictIds, int length, Float[] outValues) {
+    for (int i = 0; i < length; i++) {
+      outValues[i] = getFloatValue(dictIds[i]);
+    }
+  }
+
   default void readDoubleValues(int[] dictIds, int length, double[] outValues) {
+    for (int i = 0; i < length; i++) {
+      outValues[i] = getDoubleValue(dictIds[i]);
+    }
+  }
+
+  default void readDoubleValues(int[] dictIds, int length, Double[] outValues) {
     for (int i = 0; i < length; i++) {
       outValues[i] = getDoubleValue(dictIds[i]);
     }
@@ -241,5 +266,28 @@ public interface Dictionary extends Closeable {
     for (int i = 0; i < length; i++) {
       outValues[i] = getBytesValue(dictIds[i]);
     }
+  }
+
+  default void getDictIds(List<String> values, IntSet dictIds) {
+    for (String value : values) {
+      int dictId = indexOf(value);
+      if (dictId >= 0) {
+        dictIds.add(dictId);
+      }
+    }
+  }
+
+  /**
+   * Returns the dictIds for the given sorted values. This method is for the IN/NOT IN predicate evaluation.
+   */
+  default void getDictIds(List<String> sortedValues, IntSet dictIds, SortedBatchLookupAlgorithm algorithm) {
+    getDictIds(sortedValues, dictIds);
+  }
+
+  enum SortedBatchLookupAlgorithm {
+    DIVIDE_BINARY_SEARCH, SCAN,
+    // Plain binary search should not be used because it does not require sorting the values. We keep it here as a valid
+    // query option value, which should be handled with the unsorted values' algorithm.
+    PLAIN_BINARY_SEARCH
   }
 }

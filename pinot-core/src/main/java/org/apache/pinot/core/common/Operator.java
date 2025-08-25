@@ -42,17 +42,41 @@ public interface Operator<T extends Block> {
   T nextBlock();
 
   /** @return List of {@link Operator}s that this operator depends upon. */
-  List<Operator> getChildOperators();
+  List<? extends Operator> getChildOperators();
 
   /** @return Explain Plan description if available; otherwise, null. */
   @Nullable
   String toExplainString();
 
+  default void prepareForExplainPlan(ExplainPlanRows explainPlanRows) {
+  }
+
+  default void postExplainPlan(ExplainPlanRows explainPlanRows) {
+  }
+
+  default void explainPlan(ExplainPlanRows explainPlanRows, int[] globalId, int parentId) {
+    prepareForExplainPlan(explainPlanRows);
+    String explainPlanString = toExplainString();
+    if (explainPlanString != null) {
+      ExplainPlanRowData explainPlanRowData = new ExplainPlanRowData(explainPlanString, globalId[0], parentId);
+      parentId = globalId[0]++;
+      explainPlanRows.appendExplainPlanRowData(explainPlanRowData);
+    }
+
+    List<? extends Operator> children = getChildOperators();
+    for (Operator child : children) {
+      if (child != null) {
+        child.explainPlan(explainPlanRows, globalId, parentId);
+      }
+    }
+    postExplainPlan(explainPlanRows);
+  }
+
   /**
    * Returns the index segment associated with the operator.
    */
   default IndexSegment getIndexSegment() {
-    throw new UnsupportedOperationException();
+    return null;
   }
 
   /**
